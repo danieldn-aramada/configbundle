@@ -13,7 +13,7 @@
 
 ## Stack
 
-- **Language:** Go (module: `github.com/armada/configbundle`)
+- **Language:** Go 1.25.5 (module: `github.com/armada/configbundle`; go.mod pinned to 1.25.5 — homebrew install is 1.25.5, do not bump without upgrading homebrew first)
 - **Framework:** kubebuilder / controller-runtime (CRD definitions, controllers)
 - **Deployment:** AKS (cloud: bundler service); Galleon Mgmt Cluster (ConfigBundle Controller)
 - **Key libraries:** `k8s.io/client-go`, `sigs.k8s.io/controller-runtime`, `oras-project/oras-go`, `sigstore/cosign`
@@ -94,6 +94,11 @@ See [`docs/claude/_index.md`](docs/claude/_index.md) for the full routing table.
 - Before marking a task done: check whether any decisions from this session belong in CLAUDE.md or a domain file
 - At PR phase: if the diff introduces a settled decision, update the relevant domain file in the same commit — do not defer
 - **Library first:** Use top-level importable packages only (e.g. `api/v1alpha1/`, `bundle/`). Do not add `cmd/` or `internal/` until controllers are explicitly being implemented.
+- **Write tests alongside every behavioral change** — when you add a field, persist data, change an API response, or introduce an interface, include tests asserting the new behavior in the same response. Do not wait to be asked.
+- **Run tests after writing them** — always run `make test` after writing new tests. If tests fail, diagnose and fix before reporting done. Do not hand back failing tests.
+- **Test at the lowest isolatable level** — unit (no services, `testing.T` table-driven) → envtest (K8s API, Ginkgo) → e2e (running cluster). Choose the lowest level where the behavior is fully exercised. Unit tests for pure logic (parsing, filtering); envtest for K8s apply/watch behavior.
+- **Any persistence requires a round-trip test** — if data is written to the K8s API or any file: write a test that writes, reads back, and asserts. Persistence bugs are invisible without this.
+- **Interfaces at external boundaries** — OCI clients, HTTP clients, and other I/O-bound dependencies must be injected via interfaces so tests can substitute fakes. Never make external calls non-injectable.
 
 ## Conversation Conventions
 
@@ -114,10 +119,15 @@ Explicitly decided. Do not re-suggest.
 - **cosign for signing** — signature stored as OCI referrer artifact on the bundle digest; Galleons hold only the public key; verification works fully air-gapped without reaching ACR
 - **apiVersion: armada.ai/v1** — for all CRD types defined in this repo
 - **No `AI.md`** — AI session metadata lives in git commit trailers (`AI-model`, `AI-settled`), not a separate file. See ADR-002.
-- **No separate edge agent** — the ConfigBundle Controller owns the full edge OCI pipeline (poll Zot → cosign verify → write ConfigBundle CR → decompose to child CRs). Splitting into agent + controller added complexity with no benefit once orb owns its own Dgraph import.
-- **Orb owns Dgraph import** — configbundle never calls orb's import API. The ConfigBundle CR written to etcd is the signal; orb reacts to it on its own terms.
+- **No separate edge agent** — the ConfigBundle Controller owns the full edge OCI pipeline (poll Zot → cosign verify → import to orb → write ConfigBundle CR → decompose to child CRs).
+- **Puller calls orb `POST /import/subgraph` before writing the ConfigBundle CR** — the Puller extracts `data.json.gz` and `schema.gz` graph layers from the OCI artifact and POSTs them to orb. Waits for 2xx. If orb fails, the cycle aborts — no CR is written. This guarantees config delivery state and Dgraph state are always derived from the same artifact version.
+- **Orb does not poll Zot** — orb's sole import interface is `POST /import/subgraph`. The ConfigBundle Controller is the only OCI consumer on the edge. Do not reintroduce independent Zot polling in orb.
+- **`ORB_ENDPOINT` env var** — configures orb's base URL (default `http://localhost:8001`). Required for the Puller.
 - **Local overrides are at ConfigBundle CR level only** — child CRs (ServerConfig, etc.) are derived state and are never an override surface. `local:<admin-id>` field managers are only valid on the ConfigBundle CR. Do not implement or support local overrides on child CRs.
 - **SSA has no partial apply** — if a manifest includes even one field owned by another manager (without `--force-conflicts`), the entire apply fails (409). No fields are updated, including ones the applier legitimately owns. Verified experimentally. This is the key design constraint for the Puller (Spike 5).
 - **`+listType=map +listMapKey=serviceTag` is required on `servers[]` before Spike 5 or 7** — without it, SSA treats `servers[]` as atomic. A single admin override on any server field locks the whole array, and combined with no-partial-apply, blocks all server config changes on the next Puller cycle. Add the markers to `ConfigBundleSpec.Servers` and run `make generate && make manifests`.
+- **Local override field manager is `local:admin` for MVP** — single fixed string; do not make it dynamic or enumerate multiple managers. Post-MVP RBAC work will address per-person `local:<admin-id>` managers and K8s RBAC enforcement. The Puller identifies local overrides by checking `manager == "local:admin"` in managedFields.
+- **Puller stays in the ConfigBundle Controller binary for MVP** — the Puller (`ctrl.Runnable`) and Decomposition Reconciler share a binary. They must share no in-process state — the ConfigBundle CR is their only interface. This makes splitting into separate deployments a future ops decision, not a code rewrite.
+- **Puller does not force-override local fields** — the Puller inspects `managedFields`, omits fields owned by `local:admin`, and applies without `ForceOwnership`. The force-upstream action (SDD cloud admin action 2) is deferred post-MVP; it requires the Divergence Reporter to exist first so cloud admins have visibility before forcing.
 
 *Add new settled decisions here whenever a significant architectural choice is made. Include the decision in the same PR as the code that reflects it.*

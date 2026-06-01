@@ -93,6 +93,7 @@ spec:
                 - ipmiEnabled
                 - lockdownModeEnabled
                 - osToIdracPassThroughEnabled
+                - racadmEnabled
                 - sshEnabled
                 - usbManagementPortEnabled
                 type: object

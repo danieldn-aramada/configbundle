@@ -47,7 +47,11 @@ spec:
         racadmEnabled: true
 status:
   phase: Applied        # Pending | Applying | Applied | Failed
-  conditions: []
+  conditions:
+    - type: ArtifactFetched      # OCI pull succeeded
+    - type: SignatureVerified    # cosign verify passed
+    - type: GraphImported        # orb POST /import/subgraph returned 2xx
+    - type: Reconciled           # decomposition to child CRs complete
   lastAppliedDigest: sha256:abc123...
   lastAppliedAt: "2026-05-26T12:00:00Z"
 ```
@@ -161,7 +165,7 @@ These behaviors map to the cloud admin resolution actions in orbital-context.md:
 - **Status subresource** — status updates go through the status subresource endpoint. Use a separate SSA patch on the status subresource after updating spec.
 - **Bool fields and omitempty** — removing omitempty is intentional on desired-state bools. Do not add it back. See Key decisions above.
 - **`+listType=map` prerequisite** — `servers[]` does not yet have this annotation. Do not implement the Divergence Reporter until it is added and `make generate && make manifests` has been run and verified.
-- **No partial apply — Puller design implication** — The Puller cannot blindly send the full ConfigBundle CR spec if any fields are locally overridden (without ForceOwnership). A single conflict causes the entire apply to fail, including legitimate cloud-intent changes on uncontested fields. The Puller must inspect `managedFields` first and either: (a) omit locally-owned fields from the patch (Resolution #2), or (b) use ForceOwnership and wipe overrides. This is an open design question for Spike 5.
+- **No partial apply — Puller uses Resolution #2 (omit contested entries)** — The Puller inspects `managedFields` before applying. Any server entry with any field owned by `local:admin` is omitted from the SSA patch entirely. With `+listType=map`, omitting a full entry (not just the contested field) is safe: the admin's intent for that server is preserved, and the Puller still updates uncontested server entries without conflict. `ForceOwnership` is not used on the ConfigBundle CR.
 
 ---
 

@@ -98,6 +98,7 @@ spec:
                       - ipmiEnabled
                       - lockdownModeEnabled
                       - osToIdracPassThroughEnabled
+                      - racadmEnabled
                       - sshEnabled
                       - usbManagementPortEnabled
                       type: object
@@ -109,7 +110,7 @@ spec:
                     serviceTag:
                       description: |-
                         ServiceTag is the Dell hardware service tag (e.g. "3RK3V64").
-                        Used as the identity key. The child ServerConfig CR is named strings.ToLower(ServiceTag).
+                        Identity key within the bundle. Propagated to the child ServerConfig spec.
                       type: string
                   required:
                   - hostname
@@ -117,6 +118,9 @@ spec:
                   - serviceTag
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - serviceTag
+                x-kubernetes-list-type: map
             required:
             - datacenter
             type: object

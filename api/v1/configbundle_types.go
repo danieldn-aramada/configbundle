@@ -74,6 +74,8 @@ type ConfigBundleSpec struct {
 
 	// Servers is the list of server configurations for this datacenter.
 	// +optional
+	// +listType=map
+	// +listMapKey=serviceTag
 	Servers []ServerSpec `json:"servers,omitempty"`
 }
 
@@ -86,6 +88,18 @@ const (
 	ConfigBundlePhaseApplying ConfigBundlePhase = "Applying"
 	ConfigBundlePhaseApplied  ConfigBundlePhase = "Applied"
 	ConfigBundlePhaseFailed   ConfigBundlePhase = "Failed"
+)
+
+// Condition type constants for ConfigBundleStatus.Conditions.
+const (
+	// ConditionArtifactFetched is set when the OCI artifact has been pulled from Zot.
+	ConditionArtifactFetched = "ArtifactFetched"
+	// ConditionSignatureVerified is set when the cosign signature has been verified.
+	ConditionSignatureVerified = "SignatureVerified"
+	// ConditionGraphImported is set when orb's POST /api/v1/import/subgraph returned 2xx.
+	ConditionGraphImported = "GraphImported"
+	// ConditionReconciled is set by the Decomposition Reconciler when all child CRs are in sync.
+	ConditionReconciled = "Reconciled"
 )
 
 // ConfigBundleStatus records the controller's observed state.

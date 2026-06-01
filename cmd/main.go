@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -40,6 +41,15 @@ import (
 	// +kubebuilder:scaffold:imports
 )
 
+// envOrDefault returns the value of the environment variable key,
+// or defaultVal if the variable is unset or empty.
+func envOrDefault(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
+}
+
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
@@ -58,13 +68,15 @@ func main() {
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
+	var enablePuller bool
+	var enableOrbImport bool
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8091", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -79,6 +91,12 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enablePuller, "enable-puller", false,
+		"Enable the Puller runnable (OCI poll → cosign verify → orb import → ConfigBundle CR write). "+
+			"Defaults to false; set to true in production via helm/kustomize.")
+	flag.BoolVar(&enableOrbImport, "enable-orb-import", false,
+		"Enable orb POST /import/subgraph call within the Puller cycle. "+
+			"Defaults to false; set to true in production. When false, GraphImported condition is set to False/Disabled.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -185,6 +203,42 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "configbundle")
 		os.Exit(1)
 	}
+
+	// Wire the Puller unless disabled via --enable-puller=false.
+	// When enabled, DATACENTER must be set — omitting it skips registration even if the flag is true.
+	if !enablePuller {
+		setupLog.Info("Puller disabled via --enable-puller=false")
+	} else if datacenter := os.Getenv("DATACENTER"); datacenter != "" {
+		pollInterval, err := time.ParseDuration(envOrDefault("POLL_INTERVAL", "60s"))
+		if err != nil {
+			setupLog.Error(err, "Invalid POLL_INTERVAL")
+			os.Exit(1)
+		}
+		namespace := envOrDefault("NAMESPACE", "configbundle-system")
+
+		puller := &controller.Puller{
+			Client: mgr.GetClient(),
+			Config: controller.PullerConfig{
+				RegistryURL:      envOrDefault("EDGE_REGISTRY_URL", "localhost:5000"),
+				PollInterval:     pollInterval,
+				OrbEndpoint:      envOrDefault("ORB_ENDPOINT", "http://localhost:8001"),
+				Datacenter:       datacenter,
+				Namespace:        namespace,
+				OrbImportEnabled: enableOrbImport,
+			},
+			OCI: controller.NewHTTPOCIClient(
+				envOrDefault("EDGE_REGISTRY_URL", "localhost:5000"),
+				envOrDefault("COSIGN_PUBLIC_KEY_PATH", "/etc/configbundle/cosign.pub"),
+			),
+			Orb: controller.NewHTTPOrbClient(envOrDefault("ORB_ENDPOINT", "http://localhost:8001")),
+		}
+		if err := mgr.Add(puller); err != nil {
+			setupLog.Error(err, "Failed to register Puller")
+			os.Exit(1)
+		}
+		setupLog.Info("Puller registered", "datacenter", datacenter, "interval", pollInterval)
+	}
+
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

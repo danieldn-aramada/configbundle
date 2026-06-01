@@ -6,17 +6,18 @@
 
 ## Overview
 
-There is no separate edge agent binary. The ConfigBundle Controller owns the full edge pipeline: it polls the local Zot registry, cosign-verifies each artifact, writes the `ConfigBundle` CR, and decomposes it into domain child CRs. Orb owns its own Dgraph import — configbundle never calls orb's import API. The ConfigBundle CR written to etcd is the handoff artifact; orb reacts to it independently.
+There is no separate edge agent binary. The ConfigBundle Controller owns the full edge pipeline: it polls the local Zot registry, cosign-verifies each artifact, calls orb's `POST /import/subgraph` to import graph data, writes the `ConfigBundle` CR, and decomposes it into domain child CRs. Orb does not poll Zot — it receives graph data from the Puller via its import API. The ConfigBundle CR is the configuration delivery handoff; orb's Dgraph state is driven by the Puller's explicit call.
 
 ---
 
 ## Key decisions
 
-- **No separate edge agent** — OCI polling, cosign verification, and ConfigBundle CR writing are part of the ConfigBundle Controller, not a separate sidecar binary. Do not create an `edge-agent` binary.
-- **Orb owns Dgraph import** — configbundle never calls orb's `/import` endpoint. The ConfigBundle CR is the signal; orb is responsible for reacting to it and importing its own graph data.
+- **No separate edge agent** — OCI polling, cosign verification, orb import, and ConfigBundle CR writing are all part of the ConfigBundle Controller. Do not create an `edge-agent` binary.
+- **Puller calls orb before writing the ConfigBundle CR** — the Puller extracts graph layers (data.json.gz, schema.gz) from the OCI artifact and calls orb `POST /import/subgraph`. It waits for a success response before proceeding. If orb returns an error, the cycle aborts — no CR is written. Retries on next poll interval.
+- **Orb does not poll Zot** — orb's `POST /import/subgraph` API is the sole import interface. The ConfigBundle Controller is the only OCI consumer on the edge. This eliminates the version coherence gap that would arise from two independent tag pollers.
 - **Edge always pulls** — the controller polls Zot on a configurable interval. No push, no webhook, no cloud-initiated connection.
-- **cosign verify before writing CR** — verification uses the Galleon's local public key (no ACR reachability required). A bundle that fails verification is rejected; no CR is written.
-- **Idempotent on digest** — if the artifact at the current tag has the same digest as `status.lastAppliedDigest`, skip all processing. Do not re-verify, re-apply, or re-decompose.
+- **cosign verify before any downstream action** — verification uses the Galleon's local public key (no ACR reachability required). A bundle that fails verification is rejected; neither orb import nor CR write occurs.
+- **Idempotent on digest** — if the artifact at the current tag has the same digest as `status.lastAppliedDigest`, skip all processing. Do not re-verify, re-import, re-apply, or re-decompose.
 - **Single field manager** — `configbundle-controller` owns all fields it writes on both the ConfigBundle CR and child CRs. Local admin overrides use `local:<admin-id>` — but ONLY on the ConfigBundle CR, never on child CRs.
 - **Local overrides are at ConfigBundle CR level only** — child CRs are derived state, not an override surface. The Puller applies the ConfigBundle CR spec WITHOUT `ForceOwnership` so SSA preserves locally-owned fields. The Decomposition Reconciler applies child CR specs WITH `ForceOwnership` because child CRs always faithfully reflect the ConfigBundle CR (including any local overrides already merged into it).
 - **Divergence is data, not an error** — a disconnected Galleon that hasn't received a new artifact is in a valid (diverged) state. Do not block or error on lack of convergence.
@@ -30,10 +31,13 @@ The controller is a single binary (Mgmt Cluster) with three goroutines managed b
 ### Puller (`ctrl.Runnable`) — time-driven, not event-driven
 1. **Poll Zot** on `POLL_INTERVAL` for the datacenter's OCI tag
 2. **Compare digest** against `status.lastAppliedDigest` on the ConfigBundle CR — skip if unchanged
-3. **cosign verify** using local public key at `COSIGN_PUBLIC_KEY_PATH` — reject and write no CR if verification fails
-4. **Extract** the `application/vnd.armada.configbundle.manifest.v1+yaml` layer
-5. **Apply ConfigBundle CR spec** via SSA WITHOUT `ForceOwnership` — locally-owned fields (from `local:<admin-id>`) are preserved. **⚠ Open design question (Spike 5):** SSA has no partial apply — if the full manifest includes any locally-owned field, the entire apply fails (409), including legitimate cloud-intent changes on uncontested fields. The Puller must either inspect `managedFields` first and omit locally-owned fields, or accept that it uses ForceOwnership (wiping overrides). See crd-context.md § SSA conflict resolution.
-6. **Update ConfigBundle CR status** (status subresource): `lastAppliedDigest`, `lastAppliedAt`, `ArtifactFetched` condition, `SignatureVerified` condition
+3. **cosign verify** using local public key at `COSIGN_PUBLIC_KEY_PATH` — reject entire cycle if verification fails; no import, no CR write
+4. **Extract layers** from the verified artifact:
+   - `application/vnd.armada.configbundle.manifest.v1+yaml` — config portion for ConfigBundle CR spec
+   - `data.json.gz` and `schema.gz` — graph layers for orb import
+5. **Call orb `POST /import/subgraph`** at `ORB_ENDPOINT` with the graph layers — wait for success (2xx). If orb returns error or is unreachable, abort cycle; do not write CR. Retry on next poll interval.
+6. **Apply ConfigBundle CR spec** via SSA WITHOUT `ForceOwnership` — inspect `managedFields` first and omit fields owned by `local:admin` from the patch to avoid 409 on contested fields. See crd-context.md § SSA conflict resolution.
+7. **Update ConfigBundle CR status** (status subresource): `lastAppliedDigest`, `lastAppliedAt`, `ArtifactFetched` condition, `SignatureVerified` condition, `GraphImported` condition
 
 ### Decomposition Reconciler (`ctrl.Reconciler`) — event-driven, triggered by ConfigBundle CR changes
 7. **Decompose ConfigBundle CR** into domain child CRs via SSA WITH `ForceOwnership` — child CRs faithfully reflect the ConfigBundle CR (including any local overrides already merged into it)
@@ -54,6 +58,7 @@ The controller is a single binary (Mgmt Cluster) with three goroutines managed b
 | `EDGE_REGISTRY_URL` | `http://localhost:5000` | Zot OCI registry URL |
 | `COSIGN_PUBLIC_KEY_PATH` | `/etc/configbundle/cosign.pub` | Path to cosign public key |
 | `POLL_INTERVAL` | `60s` | How often to check for new artifacts |
+| `ORB_ENDPOINT` | `http://localhost:8001` | Orb import API base URL (`POST /import/subgraph` is called here) |
 | `DIVERGENCE_REPORT_DEST` | — | S3/NFS path for divergence reports (required) |
 
 ---
@@ -73,7 +78,8 @@ The controller is a single binary (Mgmt Cluster) with three goroutines managed b
 
 - **cosign verify is mandatory** — do not add a flag to skip it. The air-gap trust guarantee depends on the controller being the only entity that can introduce new state.
 - **Zot is the only OCI source** — the controller never pulls from ACR directly. Always from local Zot.
-- **Do not call orb** — no HTTP calls to orb from the controller. The ConfigBundle CR is the complete interface. If orb needs to react to a new bundle, that is orb's concern.
+- **Orb import must succeed before CR write** — do not apply the ConfigBundle CR if orb returns a non-2xx response. Writing the CR while Dgraph is stale creates a coherence gap between configuration delivery state and graph state. Abort and retry on next poll cycle.
+- **Only call orb's `POST /import/subgraph`** — the Puller passes graph layers extracted from the OCI artifact. It does not call any other orb endpoint and does not import configbundle packages from orb. One-way dependency only.
 - **Local overrides are at ConfigBundle CR level only** — do not implement or support `local:<admin-id>` field managers on child CRs (ServerConfig, ClusterConfig, etc.). Child CRs are derived state. Overrides belong on the ConfigBundle CR where they are visible and tracked.
 - **Puller must NOT use ForceOwnership on ConfigBundle CR** — this is what allows local overrides to persist across bundle cycles. SSA conflict detection handles the rest.
 - **Decomposition Reconciler MUST use ForceOwnership on child CRs** — child CRs always reflect the ConfigBundle CR faithfully. There is no case where a child CR field should diverge from what the ConfigBundle CR says.
