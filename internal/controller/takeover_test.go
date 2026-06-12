@@ -71,8 +71,8 @@ func TestSetFieldOnServer_MinimalPatch(t *testing.T) {
 		Hostname:   "host-01",
 		OobIP:      "10.10.1.45",
 		Idrac: armadav1.IdracSpec{
-			SSHEnabled:  true,
-			IPMIEnabled: true,
+			SSHEnabled:    true,
+			IPMIEnabled:   true,
 			RacadmEnabled: true,
 		},
 	}

@@ -1,10 +1,13 @@
-# Registry and versioning
-ACR     := armadaeksatest.azurecr.io
-VERSION := $(shell git describe --tags --dirty 2>/dev/null || echo "v0.0.0-dev")
+# Registry and per-component versioning.
+# Controller: controller/v* tags. Bundler: bundler/v* tags.
+# Tag with: git tag controller/v0.1.0  or  git tag bundler/v0.0.2
+ACR                := armadaeksatest.azurecr.io
+CONTROLLER_VERSION := $(shell (git describe --tags --match 'controller/v*' --dirty 2>/dev/null || echo "controller/v0.0.0-dev") | sed 's|^controller/||')
+BUNDLER_VERSION    := $(shell (git describe --tags --match 'bundler/v*' --dirty 2>/dev/null || echo "bundler/v0.0.0-dev") | sed 's|^bundler/||')
 
 # Image URLs
-IMG         ?= $(ACR)/configbundle-controller:$(VERSION)
-BUNDLER_IMG ?= $(ACR)/configbundle-bundler:$(VERSION)
+IMG         ?= $(ACR)/configbundle-controller:$(CONTROLLER_VERSION)
+BUNDLER_IMG ?= $(ACR)/configbundle-bundler:$(BUNDLER_VERSION)
 
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
@@ -98,7 +101,7 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests against
 
 .PHONY: test-e2e-local
 test-e2e-local: manifests generate fmt vet ## Run ConfigBundle e2e tests against a running local controller.
-	@echo "Requires: 'make install' applied and 'make run' running in another terminal."
+	@echo "Requires: 'make install' applied and 'make run-controller' running in another terminal."
 	CONTROLLER_RUNNING=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.focus "ConfigBundle"
 
 .PHONY: cleanup-test-e2e
@@ -123,24 +126,47 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
-.PHONY: run
-run: ## Run a controller from your host.
+.PHONY: up
+up: ## Start minikube and install CRDs — ready for 'make run'.
+	@minikube status >/dev/null 2>&1 || minikube start
+	@$(MAKE) install
+	@echo ""
+	@echo "Cluster ready. Next steps:"
+	@echo "  Terminal 1: make run-controller"
+	@echo "  Terminal 2: make run-bundler   (optional — only if testing bundler)"
+	@echo ""
+	@echo "Env vars for local testing with orb:"
+	@echo "  NAMESPACE=default CB_CONTROLLER_PORT=:8095 ORB_DIVERGENCE_INTAKE_URL=http://localhost:8010/api/v1/divergence DIVERGENCE_REPORTER_ENABLED=true"
+
+.PHONY: down
+down: ## Stop minikube.
+	minikube stop
+
+.PHONY: run-controller
+run-controller: ## Run the controller from your host (set NAMESPACE=default for local testing).
 	go run ./cmd/main.go
 
 .PHONY: run-bundler
-run-bundler: ## Run the bundler enricher service locally (defaults: BUNDLER_PORT=8020, ORBITAL_GRAPHQL_URL=http://localhost:8001/graphql).
+run-bundler: ## Run the bundler service locally (BUNDLER_PORT=8020, ORBITAL_GRAPHQL_URL=http://localhost:8001/graphql).
 	go run ./cmd/bundler/main.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-.PHONY: docker-build
-docker-build: ## Build controller image (requires: az acr login --name armadaeksatest).
+.PHONY: docker-build-controller
+docker-build-controller: ## Build and push controller image (requires: az acr login --name armadaeksatest).
+	@echo "Building $(IMG)"
 	docker buildx build --platform linux/amd64 --target controller -t $(IMG) --push .
 
 .PHONY: docker-build-bundler
 docker-build-bundler: ## Build and push bundler image (requires: az acr login --name armadaeksatest).
+	@echo "Building $(BUNDLER_IMG)"
 	docker buildx build --platform linux/amd64 --target bundler -t $(BUNDLER_IMG) --push .
+
+.PHONY: version
+version: ## Show current versions for both components.
+	@echo "controller: $(CONTROLLER_VERSION)"
+	@echo "bundler:    $(BUNDLER_VERSION)"
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

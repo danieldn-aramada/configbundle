@@ -93,7 +93,9 @@ Listens on `CB_CONTROLLER_PORT` (default `:8095`).
 2. **Inspect `managedFields`** on the existing ConfigBundle CR — identify fields owned by `local:admin`
 3. **`omitAdminOwnedServers`** — remove any server entries (or server fields) from the patch that are owned by `local:admin` to avoid SSA 409 conflicts
 4. **SSA patch** WITHOUT `ForceOwnership`, field manager `configbundle-controller` — SSA preserves locally-owned fields. See crd-context.md § SSA conflict resolution.
-5. **Update ConfigBundle CR status** (status subresource): `lastAppliedDigest` (`X-Orb-Digest`), `lastOrbImportID` (`X-Orb-Import-ID`), `lastAppliedAt`, `Reconciled=True` condition
+5. **Process `spec.takeover[]`** — for each entry, submit a narrow SSA apply containing only that field with `ForceOwnership`, reclaiming ownership from `local:admin`. Runs regardless of step 4 success (ADR-006).
+6. **Record last-applied manifest** for the Divergence Reporter to compare against
+7. **Update ConfigBundle CR status** (status subresource): `lastAppliedDigest` (`X-Orb-Digest`), `lastOrbImportID` (`X-Orb-Import-ID`), `lastAppliedAt`, `Reconciled=True` condition
 
 **Response codes:**
 - `200` — manifest applied successfully; orb records this in import history
@@ -105,9 +107,9 @@ Listens on `CB_CONTROLLER_PORT` (default `:8095`).
 3. **Update ConfigBundle CR status**: `phase`, `Reconciled` condition
 
 ### Divergence Reporter (`ctrl.Runnable`) — scheduled
-1. **Inspect `managedFields`** on the ConfigBundle CR — fields owned by `local:admin` are local overrides
-2. **Publish divergence report** to `DIVERGENCE_REPORT_DEST`: field path, CR, override owner, since when
-3. **Compare against last applied manifest** to produce field-level divergence (cloud intent vs current ConfigBundle CR state)
+1. **Inspect `managedFields`** on each ConfigBundle CR — find fields owned by `local:admin`
+2. **Compare against last applied manifest** — produce field-level divergence entries (intended vs override value)
+3. **POST the full override set** to orb's divergence intake (`ORB_DIVERGENCE_INTAKE_URL`) — replace-not-merge semantics
 
 ---
 
@@ -116,7 +118,9 @@ Listens on `CB_CONTROLLER_PORT` (default `:8095`).
 | Variable | Default | Description |
 |---|---|---|
 | `CB_CONTROLLER_PORT` | `:8095` | Listen address for `POST /consume` (ConsumeServer) |
-| `DIVERGENCE_REPORT_DEST` | — | S3/NFS path for divergence reports (required) |
+| `ORB_DIVERGENCE_INTAKE_URL` | `http://orb:8010/api/v1/divergence` | Where the Divergence Reporter POSTs override entries |
+| `DIVERGENCE_REPORTER_SCHEDULE` | `*/5 * * * *` | Cron expression (currently implemented as fixed interval) |
+| `DIVERGENCE_REPORTER_ENABLED` | `false` | Default off; explicit enable per environment |
 
 ---
 
@@ -124,10 +128,12 @@ Listens on `CB_CONTROLLER_PORT` (default `:8095`).
 
 - The Divergence Reporter inspects `managedFields` on the **ConfigBundle CR only** — not child CRs
 - Fields owned by `local:admin` on the ConfigBundle CR are local overrides
-- Divergence report contains: field path, CR name, override owner, since when, delta vs last applied manifest
-- Reports published to `DIVERGENCE_REPORT_DEST` on schedule and on demand
+- Divergence report contains: field path, intended value, override value, who (`local:admin`), when (`managedFields[].time`)
+- Reports POSTed to orb's divergence intake (`ORB_DIVERGENCE_INTAKE_URL`) — orb translates K8s paths to orbId+field via the mapping layer and relays to S3 for orbital ingestion
+- Each POST is a full replace-not-merge snapshot — if a field is no longer owned by `local:admin`, it disappears from the next report
+- `overrides: []` is valid and means "no local overrides" — orbital interprets this as all divergence resolved
 - A Galleon with no dispatches from orb (disconnected) still publishes divergence reports — time since last apply is tracked
-- **Prerequisite for implementation:** `servers[]` in `ConfigBundleSpec` needs `+listType=map +listMapKey=serviceTag` so SSA tracks field ownership within individual server entries, not just the entire array
+- **Prerequisite:** `servers[]` has `+listType=map +listMapKey=serviceTag` (done) so SSA tracks per-entry field ownership
 
 ---
 

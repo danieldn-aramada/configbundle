@@ -97,15 +97,17 @@ Architecture decisions with full rationale. Read when the context would otherwis
 ## Local Development
 
 ```bash
-make run           # terminal 1 — controller (requires CRDs: make install)
-make run-bundler   # terminal 2 — bundler on :8020
+make up                # start minikube + install CRDs
+make run-controller    # terminal 1 — controller on :8095
+make run-bundler       # terminal 2 — bundler on :8020
+make down              # stop minikube
 ```
 
 ### Running tests
 
 ```bash
 make test              # unit + envtest (requires envtest binaries: make setup-envtest)
-make test-e2e-local    # e2e against running controller (requires make install + make run)
+make test-e2e-local    # e2e against running controller (requires make install + make run-controller)
 ```
 
 ## Repository Structure

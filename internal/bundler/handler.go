@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 
@@ -17,16 +18,23 @@ type bundleRequest struct {
 	Datacenter string `json:"datacenter"`
 }
 
-// bundleLayer is one element in the JSON array returned by POST /bundle.
+// bundleResponse is the JSON object returned by POST /bundle.
+type bundleResponse struct {
+	Layers                []bundleLayer `json:"layers"`
+	ConsumedResolutionIDs []string      `json:"consumedResolutionIds,omitempty"`
+}
+
+// bundleLayer is one element in the layers array.
 type bundleLayer struct {
 	MediaType string `json:"mediaType"`
 	Data      string `json:"data"` // standard base64
 }
 
 // Handler handles POST /bundle for Orbital's enricher pipeline.
-// It is stateless — all data is fetched from Orbital GraphQL per request.
+// It is stateless — all data is fetched from Orbital per request.
 type Handler struct {
-	Orbital OrbitalQuerier
+	Orbital     OrbitalQuerier
+	Resolutions ResolutionQuerier // nil = skip takeover (e.g. in tests)
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,41 +54,58 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No datacenter found — return empty layer list. Orbital treats this as success
+	// No datacenter found — return empty response. Orbital treats this as success
 	// with no configbundle layer in the artifact.
 	if len(results) == 0 {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
+		json.NewEncoder(w).Encode(bundleResponse{})
 		return
 	}
 
 	spec := mapToSpec(results[0])
+	mapping := buildMapping(results[0])
+
+	// Query pending force-resolutions and produce spec.takeover[] entries.
+	var consumedIDs []string
+	if h.Resolutions != nil {
+		resolutions, err := h.Resolutions.QueryPendingForce(r.Context())
+		if err != nil {
+			http.Error(w, "query pending-force: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		takeover, ids := buildTakeover(resolutions, mapping)
+		spec.Takeover = takeover
+		consumedIDs = ids
+	}
+
 	yamlBytes, err := yaml.Marshal(spec)
 	if err != nil {
 		http.Error(w, "marshal manifest: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	mapping := buildMapping(results[0])
 	mappingBytes, err := json.Marshal(mapping)
 	if err != nil {
 		http.Error(w, "marshal mapping: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	layers := []bundleLayer{
-		{
-			MediaType: bundle.MediaTypeManifest,
-			Data:      base64.StdEncoding.EncodeToString(yamlBytes),
+	resp := bundleResponse{
+		Layers: []bundleLayer{
+			{
+				MediaType: bundle.MediaTypeManifest,
+				Data:      base64.StdEncoding.EncodeToString(yamlBytes),
+			},
+			{
+				MediaType: bundle.MediaTypeMapping,
+				Data:      base64.StdEncoding.EncodeToString(mappingBytes),
+			},
 		},
-		{
-			MediaType: bundle.MediaTypeMapping,
-			Data:      base64.StdEncoding.EncodeToString(mappingBytes),
-		},
+		ConsumedResolutionIDs: consumedIDs,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(layers)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // MappingEntry is one path→orbId entry in the mapping layer.
@@ -95,6 +120,62 @@ type MappingEntry struct {
 // MappingLayer is the mapping layer content written to the OCI artifact.
 type MappingLayer struct {
 	Items []MappingEntry `json:"items"`
+}
+
+// buildTakeover translates pending force-resolutions into TakeoverEntry values
+// using the mapping layer to resolve orbId → serviceTag. Returns the entries and
+// the resolution IDs that were consumed (for Orbital to mark as consumed after push).
+// Resolutions whose orbId doesn't appear in the mapping are silently skipped —
+// the resolution may belong to a different bundle or a stale entry.
+func buildTakeover(resolutions []PendingForceResolution, mapping MappingLayer) ([]armadav1.TakeoverEntry, []string) {
+	if len(resolutions) == 0 {
+		return nil, nil
+	}
+
+	// Index mapping by orbId for fast lookup.
+	orbIndex := make(map[string]MappingEntry, len(mapping.Items))
+	for _, item := range mapping.Items {
+		orbIndex[item.OrbID] = item
+	}
+
+	var entries []armadav1.TakeoverEntry
+	var consumedIDs []string
+
+	for _, res := range resolutions {
+		item, ok := orbIndex[res.OrbID]
+		if !ok {
+			continue
+		}
+		serviceTag := extractServiceTag(item.Path)
+		if serviceTag == "" {
+			continue
+		}
+		entries = append(entries, armadav1.TakeoverEntry{
+			OrbID:      res.OrbID,
+			ServiceTag: serviceTag,
+			Field:      res.Field,
+		})
+		consumedIDs = append(consumedIDs, res.ID)
+	}
+	return entries, consumedIDs
+}
+
+// extractServiceTag pulls the serviceTag value from a mapping path.
+// e.g. "spec.servers[serviceTag=3RK3V64]" → "3RK3V64"
+//
+//	"spec.servers[serviceTag=3RK3V64].idrac" → "3RK3V64"
+func extractServiceTag(path string) string {
+	const prefix = "serviceTag="
+	idx := strings.Index(path, prefix)
+	if idx < 0 {
+		return ""
+	}
+	rest := path[idx+len(prefix):]
+	end := strings.IndexByte(rest, ']')
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 // buildMapping produces the flat path→orbId mapping from a DataCenterResult.

@@ -18,7 +18,10 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -419,6 +422,394 @@ var _ = Describe("SSA list merge-key isolation on servers[]", func() {
 		serverB := findServerByTag(result.Spec.Servers, "BBB0002")
 		Expect(serverB).NotTo(BeNil(), "server B (Puller-owned) must be present")
 		Expect(serverB.Idrac.SSHEnabled).To(BeFalse(), "Puller's desired state for server B must land")
+	})
+})
+
+// ---------------------------------------------------------------------------
+// Divergence Reporter envtest tests
+// ---------------------------------------------------------------------------
+
+var _ = Describe("DivergenceReporter", func() {
+	const (
+		timeout  = 10 * time.Second
+		interval = 250 * time.Millisecond
+	)
+
+	ctx := context.Background()
+
+	var (
+		ns        string
+		nsCounter int
+	)
+
+	BeforeEach(func() {
+		nsCounter++
+		ns = fmt.Sprintf("reporter-%d", nsCounter)
+		Expect(k8sClient.Create(ctx, &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: ns},
+		})).To(Succeed())
+	})
+
+	AfterEach(func() {
+		Expect(k8sClient.Delete(ctx, &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: ns},
+		})).To(Succeed())
+	})
+
+	It("detects a local:admin override and produces correct override entries", func() {
+		const datacenter = "colo"
+
+		// Step 1: configbundle-controller applies the initial spec (cloud intent).
+		controllerApply := &armadav1.ConfigBundle{
+			TypeMeta:   metav1.TypeMeta{APIVersion: armadav1.GroupVersion.String(), Kind: "ConfigBundle"},
+			ObjectMeta: metav1.ObjectMeta{Name: datacenter, Namespace: ns},
+			Spec: armadav1.ConfigBundleSpec{
+				Datacenter: datacenter,
+				Servers: []armadav1.ServerSpec{
+					{
+						ServiceTag: "3RK3V64",
+						Hostname:   "colo-r740-01",
+						OobIP:      "10.10.1.45",
+						Idrac:      armadav1.IdracSpec{SSHEnabled: false, RacadmEnabled: true},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Patch(ctx, controllerApply, client.Apply,
+			client.FieldOwner("configbundle-controller"),
+		)).To(Succeed())
+
+		// Step 2: local:admin overrides sshEnabled to true.
+		adminApply := &armadav1.ConfigBundle{
+			TypeMeta:   metav1.TypeMeta{APIVersion: armadav1.GroupVersion.String(), Kind: "ConfigBundle"},
+			ObjectMeta: metav1.ObjectMeta{Name: datacenter, Namespace: ns},
+			Spec: armadav1.ConfigBundleSpec{
+				Datacenter: datacenter,
+				Servers: []armadav1.ServerSpec{
+					{
+						ServiceTag: "3RK3V64",
+						Idrac:      armadav1.IdracSpec{SSHEnabled: true},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Patch(ctx, adminApply, client.Apply,
+			client.FieldOwner("local:admin"),
+			client.ForceOwnership,
+		)).To(Succeed())
+
+		// Step 3: Read the CR back to get managedFields.
+		var cb armadav1.ConfigBundle
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter, Namespace: ns}, &cb)).To(Succeed())
+
+		// Step 4: Build a reporter and set the last manifest (cloud intent).
+		reporter := NewDivergenceReporter(k8sClient,
+			WithDivergenceNamespace(ns),
+			WithDivergenceEnabled(true),
+		)
+		reporter.SetLastManifest(datacenter, controllerApply.Spec)
+
+		// Step 5: Extract overrides and verify.
+		overrides := reporter.extractOverrides(&cb)
+		Expect(overrides).NotTo(BeEmpty(), "should detect at least one override")
+
+		// Find the sshEnabled override.
+		var found *OverrideEntry
+		for i := range overrides {
+			if overrides[i].Path == "spec.servers[serviceTag=3RK3V64].idrac.sshEnabled" {
+				found = &overrides[i]
+				break
+			}
+		}
+		Expect(found).NotTo(BeNil(), "should find sshEnabled override")
+		Expect(found.OverrideValue).To(Equal(true), "override value should be true")
+		Expect(found.IntendedValue).To(Equal(false), "intended value should be false")
+		Expect(found.Who).To(Equal("local:admin"))
+		Expect(found.When).NotTo(BeEmpty())
+	})
+
+	It("reports empty overrides when no local:admin fields exist", func() {
+		const datacenter = "colo"
+
+		controllerApply := &armadav1.ConfigBundle{
+			TypeMeta:   metav1.TypeMeta{APIVersion: armadav1.GroupVersion.String(), Kind: "ConfigBundle"},
+			ObjectMeta: metav1.ObjectMeta{Name: datacenter, Namespace: ns},
+			Spec: armadav1.ConfigBundleSpec{
+				Datacenter: datacenter,
+				Servers: []armadav1.ServerSpec{
+					{ServiceTag: "3RK3V64", Hostname: "colo-r740-01", OobIP: "10.10.1.45"},
+				},
+			},
+		}
+		Expect(k8sClient.Patch(ctx, controllerApply, client.Apply,
+			client.FieldOwner("configbundle-controller"),
+		)).To(Succeed())
+
+		var cb armadav1.ConfigBundle
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter, Namespace: ns}, &cb)).To(Succeed())
+
+		reporter := NewDivergenceReporter(k8sClient,
+			WithDivergenceNamespace(ns),
+			WithDivergenceEnabled(true),
+		)
+		reporter.SetLastManifest(datacenter, controllerApply.Spec)
+
+		overrides := reporter.extractOverrides(&cb)
+		Expect(overrides).To(BeEmpty(), "no local:admin fields → no overrides")
+	})
+
+	It("POSTs the divergence payload to the intake URL", func() {
+		const datacenter = "colo"
+
+		// Set up an HTTP server to capture the POST.
+		var capturedPayload DivergencePayload
+		intake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer r.Body.Close()
+			Expect(json.NewDecoder(r.Body).Decode(&capturedPayload)).To(Succeed())
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer intake.Close()
+
+		// Step 1: controller applies initial spec.
+		controllerApply := &armadav1.ConfigBundle{
+			TypeMeta:   metav1.TypeMeta{APIVersion: armadav1.GroupVersion.String(), Kind: "ConfigBundle"},
+			ObjectMeta: metav1.ObjectMeta{Name: datacenter, Namespace: ns},
+			Spec: armadav1.ConfigBundleSpec{
+				Datacenter: datacenter,
+				Servers: []armadav1.ServerSpec{
+					{
+						ServiceTag: "3RK3V64",
+						Hostname:   "colo-r740-01",
+						OobIP:      "10.10.1.45",
+						Idrac:      armadav1.IdracSpec{SSHEnabled: false},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Patch(ctx, controllerApply, client.Apply,
+			client.FieldOwner("configbundle-controller"),
+		)).To(Succeed())
+
+		// Step 2: local:admin overrides sshEnabled.
+		adminApply := &armadav1.ConfigBundle{
+			TypeMeta:   metav1.TypeMeta{APIVersion: armadav1.GroupVersion.String(), Kind: "ConfigBundle"},
+			ObjectMeta: metav1.ObjectMeta{Name: datacenter, Namespace: ns},
+			Spec: armadav1.ConfigBundleSpec{
+				Datacenter: datacenter,
+				Servers: []armadav1.ServerSpec{
+					{ServiceTag: "3RK3V64", Idrac: armadav1.IdracSpec{SSHEnabled: true}},
+				},
+			},
+		}
+		Expect(k8sClient.Patch(ctx, adminApply, client.Apply,
+			client.FieldOwner("local:admin"),
+			client.ForceOwnership,
+		)).To(Succeed())
+
+		// Update status with a digest so the payload includes it.
+		var cb armadav1.ConfigBundle
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter, Namespace: ns}, &cb)).To(Succeed())
+		cb.Status.LastAppliedDigest = "sha256:test-digest"
+		Expect(k8sClient.Status().Update(ctx, &cb)).To(Succeed())
+
+		// Step 3: Run reporter.report().
+		reporter := NewDivergenceReporter(k8sClient,
+			WithDivergenceNamespace(ns),
+			WithDivergenceEnabled(true),
+			WithDivergenceIntakeURL(intake.URL),
+		)
+		reporter.SetLastManifest(datacenter, controllerApply.Spec)
+
+		Expect(reporter.report(ctx)).To(Succeed())
+
+		// Step 4: Verify the captured payload.
+		Expect(capturedPayload.BundleDigest).To(Equal("sha256:test-digest"))
+		Expect(capturedPayload.Overrides).NotTo(BeEmpty())
+
+		var sshOverride *OverrideEntry
+		for i := range capturedPayload.Overrides {
+			if capturedPayload.Overrides[i].Path == "spec.servers[serviceTag=3RK3V64].idrac.sshEnabled" {
+				sshOverride = &capturedPayload.Overrides[i]
+				break
+			}
+		}
+		Expect(sshOverride).NotTo(BeNil())
+		Expect(sshOverride.OverrideValue).To(Equal(true))
+		Expect(sshOverride.IntendedValue).To(Equal(false))
+	})
+})
+
+// ---------------------------------------------------------------------------
+// Takeover envtest tests
+// ---------------------------------------------------------------------------
+
+var _ = Describe("Takeover", func() {
+	const (
+		timeout  = 10 * time.Second
+		interval = 250 * time.Millisecond
+	)
+
+	ctx := context.Background()
+
+	var (
+		ns        string
+		nsCounter int
+		server    *ConsumeServer
+	)
+
+	BeforeEach(func() {
+		nsCounter++
+		ns = fmt.Sprintf("takeover-%d", nsCounter)
+		Expect(k8sClient.Create(ctx, &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: ns},
+		})).To(Succeed())
+		server = NewConsumeServer(k8sClient,
+			WithNamespace(ns),
+			WithRetry(1, 0),
+		)
+	})
+
+	AfterEach(func() {
+		Expect(k8sClient.Delete(ctx, &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: ns},
+		})).To(Succeed())
+	})
+
+	It("reclaims a local:admin-owned field and leaves other admin fields intact", func() {
+		const datacenter = "colo"
+
+		// Step 1: configbundle-controller applies the initial spec.
+		controllerApply := &armadav1.ConfigBundle{
+			TypeMeta:   metav1.TypeMeta{APIVersion: armadav1.GroupVersion.String(), Kind: "ConfigBundle"},
+			ObjectMeta: metav1.ObjectMeta{Name: datacenter, Namespace: ns},
+			Spec: armadav1.ConfigBundleSpec{
+				Datacenter: datacenter,
+				Servers: []armadav1.ServerSpec{
+					{
+						ServiceTag: "3RK3V64",
+						Hostname:   "colo-r740-01",
+						OobIP:      "10.10.1.45",
+						Idrac: armadav1.IdracSpec{
+							SSHEnabled:    false,
+							RacadmEnabled: true,
+						},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Patch(ctx, controllerApply, client.Apply,
+			client.FieldOwner("configbundle-controller"),
+		)).To(Succeed())
+
+		// Step 2: local:admin overrides both sshEnabled AND racadmEnabled.
+		adminApply := &armadav1.ConfigBundle{
+			TypeMeta:   metav1.TypeMeta{APIVersion: armadav1.GroupVersion.String(), Kind: "ConfigBundle"},
+			ObjectMeta: metav1.ObjectMeta{Name: datacenter, Namespace: ns},
+			Spec: armadav1.ConfigBundleSpec{
+				Datacenter: datacenter,
+				Servers: []armadav1.ServerSpec{
+					{
+						ServiceTag: "3RK3V64",
+						Idrac: armadav1.IdracSpec{
+							SSHEnabled:    true,
+							RacadmEnabled: false,
+						},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Patch(ctx, adminApply, client.Apply,
+			client.FieldOwner("local:admin"),
+			client.ForceOwnership,
+		)).To(Succeed())
+
+		// Verify admin owns both fields before takeover.
+		var cbBefore armadav1.ConfigBundle
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter, Namespace: ns}, &cbBefore)).To(Succeed())
+		adminTags := adminOwnedServiceTags(cbBefore.ManagedFields)
+		Expect(adminTags).To(HaveKey("3RK3V64"), "admin should own the server entry")
+
+		// Step 3: Run takeover — reclaim ONLY sshEnabled, leave racadmEnabled with admin.
+		spec := armadav1.ConfigBundleSpec{
+			Datacenter: datacenter,
+			Servers: []armadav1.ServerSpec{
+				{
+					ServiceTag: "3RK3V64",
+					Hostname:   "colo-r740-01",
+					OobIP:      "10.10.1.45",
+					Idrac: armadav1.IdracSpec{
+						SSHEnabled:    false,
+						RacadmEnabled: true,
+					},
+				},
+			},
+			Takeover: []armadav1.TakeoverEntry{
+				{OrbID: "colo:srv-001-idrac", ServiceTag: "3RK3V64", Field: "sshEnabled"},
+			},
+		}
+		Expect(server.processTakeover(ctx, spec)).To(Succeed())
+
+		// Step 4: Read the CR back and verify field values.
+		var cbAfter armadav1.ConfigBundle
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter, Namespace: ns}, &cbAfter)).To(Succeed())
+
+		srv := findServerByTag(cbAfter.Spec.Servers, "3RK3V64")
+		Expect(srv).NotTo(BeNil())
+
+		// sshEnabled should be reclaimed to controller's value (false).
+		Expect(srv.Idrac.SSHEnabled).To(BeFalse(), "sshEnabled should be reclaimed to controller intent (false)")
+
+		// racadmEnabled should still be the admin's override value (false).
+		Expect(srv.Idrac.RacadmEnabled).To(BeFalse(), "racadmEnabled should still be admin's override value")
+
+		// Verify managedFields: sshEnabled should now be owned by configbundle-controller.
+		// local:admin should still own racadmEnabled but NOT sshEnabled.
+		adminPaths := extractAdminPaths(cbAfter.ManagedFields)
+		var adminOwnsSSH, adminOwnsRacadm bool
+		for _, ap := range adminPaths {
+			if ap.path == "spec.servers[serviceTag=3RK3V64].idrac.sshEnabled" {
+				adminOwnsSSH = true
+			}
+			if ap.path == "spec.servers[serviceTag=3RK3V64].idrac.racadmEnabled" {
+				adminOwnsRacadm = true
+			}
+		}
+		Expect(adminOwnsSSH).To(BeFalse(), "local:admin should no longer own sshEnabled after takeover")
+		Expect(adminOwnsRacadm).To(BeTrue(), "local:admin should still own racadmEnabled (not targeted by takeover)")
+	})
+
+	It("succeeds with empty takeover list", func() {
+		spec := armadav1.ConfigBundleSpec{Datacenter: "colo"}
+		Expect(server.processTakeover(ctx, spec)).To(Succeed())
+	})
+
+	It("returns error when targeting a nonexistent server", func() {
+		const datacenter = "colo"
+
+		controllerApply := &armadav1.ConfigBundle{
+			TypeMeta:   metav1.TypeMeta{APIVersion: armadav1.GroupVersion.String(), Kind: "ConfigBundle"},
+			ObjectMeta: metav1.ObjectMeta{Name: datacenter, Namespace: ns},
+			Spec: armadav1.ConfigBundleSpec{
+				Datacenter: datacenter,
+				Servers: []armadav1.ServerSpec{
+					{ServiceTag: "3RK3V64", Hostname: "colo-r740-01", OobIP: "10.10.1.45"},
+				},
+			},
+		}
+		Expect(k8sClient.Patch(ctx, controllerApply, client.Apply,
+			client.FieldOwner("configbundle-controller"),
+		)).To(Succeed())
+
+		spec := armadav1.ConfigBundleSpec{
+			Datacenter: datacenter,
+			Servers:    controllerApply.Spec.Servers,
+			Takeover: []armadav1.TakeoverEntry{
+				{OrbID: "x", ServiceTag: "NONEXISTENT", Field: "sshEnabled"},
+			},
+		}
+		err := server.processTakeover(ctx, spec)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("takeover entries failed"))
 	})
 })
 
