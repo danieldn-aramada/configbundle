@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"testing"
 
 	"k8s.io/utils/ptr"
@@ -113,4 +114,159 @@ func TestSetFieldOnServer_MinimalPatch(t *testing.T) {
 	if dst.Hostname != nil {
 		t.Error("hostname should remain nil")
 	}
+}
+
+// reconstructApplyExcluding produces the Apply body cb-controller submits as
+// each non-self manager to release takeover-target claims via SSA's
+// release-on-omit semantic. The reconstruction must:
+//   - include orbId (listMapKey) so SSA matches the existing list element
+//   - include serviceTag (CRD-Required) so validation passes
+//   - include the manager's OTHER claimed fields with current spec values so
+//     those claims persist (Ignore-resolved and pending-divergence claims)
+//   - OMIT any field whose (serverOrbId, field) pair appears in the exclusion
+//     set so SSA's release-on-omit strips just that claim
+//   - return touched=true iff at least one excluded field was actually
+//     present in this manager's claims (caller skips the Apply otherwise)
+func TestReconstructApplyExcluding(t *testing.T) {
+	// Live spec: one server with several idrac leaves set.
+	specMap := map[string]any{
+		"servers": []any{
+			map[string]any{
+				"orbId":      "colo:CWJHDX3",
+				"serviceTag": "CWJHDX3",
+				"hostname":   "r09-u02.colo-galleon",
+				"oobIP":      "10.10.1.45",
+				"idrac": map[string]any{
+					"sshEnabled":    true,
+					"dhcpEnabled":   true,
+					"ipmiEnabled":   false,
+					"racadmEnabled": true,
+				},
+			},
+		},
+	}
+
+	t.Run("local:admin claims sshEnabled+dhcpEnabled; only sshEnabled is takeover-target", func(t *testing.T) {
+		owned := unmarshalFields(t, `{
+			"f:servers": {
+				"k:{\"orbId\":\"colo:CWJHDX3\"}": {
+					".": {},
+					"f:idrac": {"f:sshEnabled": {}, "f:dhcpEnabled": {}},
+					"f:orbId": {}
+				}
+			}
+		}`)
+		exclude := map[string]map[string]bool{
+			"colo:CWJHDX3": {"sshEnabled": true},
+		}
+		out, touched := reconstructApplyExcluding(specMap, owned, exclude)
+		if !touched {
+			t.Fatal("expected touched=true (excluded field was present)")
+		}
+		servers, _ := out["servers"].([]any)
+		if len(servers) != 1 {
+			t.Fatalf("expected 1 server, got %d", len(servers))
+		}
+		entry := servers[0].(map[string]any)
+		if entry["orbId"] != "colo:CWJHDX3" {
+			t.Errorf("missing orbId in reconstructed entry")
+		}
+		// serviceTag is NOT included — see takeover.go comment about CRD
+		// validation running against merged state, not the Apply body.
+		if _, has := entry["serviceTag"]; has {
+			t.Error("serviceTag should not be injected; would silently extend claims")
+		}
+		idrac, _ := entry["idrac"].(map[string]any)
+		if _, has := idrac["sshEnabled"]; has {
+			t.Error("sshEnabled (takeover target) should be omitted")
+		}
+		if v, _ := idrac["dhcpEnabled"].(bool); v != true {
+			t.Errorf("dhcpEnabled (not takeover) must be preserved with live value, got %v", idrac["dhcpEnabled"])
+		}
+	})
+
+	t.Run("local:admin claims only takeover-target field — Apply has empty idrac", func(t *testing.T) {
+		owned := unmarshalFields(t, `{
+			"f:servers": {
+				"k:{\"orbId\":\"colo:CWJHDX3\"}": {
+					".": {},
+					"f:idrac": {"f:sshEnabled": {}},
+					"f:orbId": {}
+				}
+			}
+		}`)
+		exclude := map[string]map[string]bool{
+			"colo:CWJHDX3": {"sshEnabled": true},
+		}
+		out, touched := reconstructApplyExcluding(specMap, owned, exclude)
+		if !touched {
+			t.Fatal("expected touched=true")
+		}
+		servers, _ := out["servers"].([]any)
+		entry := servers[0].(map[string]any)
+		// idrac shouldn't appear at all (no fields left to apply).
+		if idrac, has := entry["idrac"]; has {
+			if m, _ := idrac.(map[string]any); len(m) != 0 {
+				t.Errorf("idrac should be absent or empty, got %v", m)
+			}
+		}
+		if entry["orbId"] != "colo:CWJHDX3" {
+			t.Errorf("orbId still required as listMapKey")
+		}
+	})
+
+	t.Run("manager doesn't claim any takeover-target — touched=false", func(t *testing.T) {
+		owned := unmarshalFields(t, `{
+			"f:servers": {
+				"k:{\"orbId\":\"colo:CWJHDX3\"}": {
+					".": {},
+					"f:idrac": {"f:dhcpEnabled": {}},
+					"f:orbId": {}
+				}
+			}
+		}`)
+		exclude := map[string]map[string]bool{
+			"colo:CWJHDX3": {"sshEnabled": true},
+		}
+		_, touched := reconstructApplyExcluding(specMap, owned, exclude)
+		if touched {
+			t.Error("touched must be false — manager claims dhcpEnabled but takeover targets only sshEnabled")
+		}
+	})
+
+	t.Run("top-level Server field is a takeover target", func(t *testing.T) {
+		owned := unmarshalFields(t, `{
+			"f:servers": {
+				"k:{\"orbId\":\"colo:CWJHDX3\"}": {
+					".": {},
+					"f:hostname": {},
+					"f:oobIP": {},
+					"f:orbId": {}
+				}
+			}
+		}`)
+		exclude := map[string]map[string]bool{
+			"colo:CWJHDX3": {"hostname": true},
+		}
+		out, touched := reconstructApplyExcluding(specMap, owned, exclude)
+		if !touched {
+			t.Fatal("expected touched=true")
+		}
+		entry := out["servers"].([]any)[0].(map[string]any)
+		if _, has := entry["hostname"]; has {
+			t.Error("hostname (takeover target) should be omitted")
+		}
+		if entry["oobIP"] != "10.10.1.45" {
+			t.Errorf("oobIP must be preserved with live value, got %v", entry["oobIP"])
+		}
+	})
+}
+
+func unmarshalFields(t *testing.T, s string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return m
 }

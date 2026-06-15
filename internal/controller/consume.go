@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -344,23 +346,34 @@ func (s *ConsumeServer) applyManifest(ctx context.Context, body []byte, digest, 
 		s.reporter.SetLastManifest(spec.Datacenter, spec)
 	}
 
-	// After client.Apply, controller-runtime deserialises the server response back
-	// into apply — giving us the current ResourceVersion and existing Status without
-	// a second round-trip.
-	now := metav1.Now()
-	apply.Status.LastAppliedDigest = digest
-	apply.Status.LastOrbImportID = importID
-	apply.Status.LastAppliedAt = &now
-	prev := setCondition(&apply.Status.Conditions, armadav1.ConditionReconciled,
-		metav1.ConditionTrue, "Reconciled", "manifest applied via orb dispatch")
+	// Re-read inside RetryOnConflict so each attempt works against a fresh
+	// resourceVersion. The ConfigBundleReconciler also writes ObservedGeneration
+	// in response to the SSA patch above; without this retry, that race surfaces
+	// as a 409 "the object has been modified" and the work is dropped.
+	var prev metav1.ConditionStatus
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &armadav1.ConfigBundle{}
+		if err := s.Client.Get(ctx, client.ObjectKeyFromObject(apply), cur); err != nil {
+			return err
+		}
+		now := metav1.Now()
+		cur.Status.LastAppliedDigest = digest
+		cur.Status.LastOrbImportID = importID
+		cur.Status.LastAppliedAt = &now
+		prev = setCondition(&cur.Status.Conditions, armadav1.ConditionReconciled,
+			metav1.ConditionTrue, "Reconciled", "manifest applied via orb dispatch")
+		return s.Client.Status().Update(ctx, cur)
+	})
+	if err != nil {
+		if apierrors.IsConflict(err) {
+			return fmt.Errorf("update ConfigBundle status gave up after retries: %w", err)
+		}
+		return fmt.Errorf("update ConfigBundle status: %w", err)
+	}
 	if prev != metav1.ConditionTrue {
 		log.FromContext(ctx).WithName("consume").Info("condition transitioned",
 			"type", armadav1.ConditionReconciled, "from", prev, "to", metav1.ConditionTrue,
 			"reason", "Reconciled")
-	}
-
-	if err := s.Client.Status().Update(ctx, apply); err != nil {
-		return fmt.Errorf("update ConfigBundle status: %w", err)
 	}
 
 	return nil

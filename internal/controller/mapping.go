@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -81,26 +82,30 @@ func MappingConfigMapName(cbName string) string {
 
 // writeMappingConfigMap creates or updates the mapping ConfigMap for a ConfigBundle.
 // The ConfigMap is owned by the CR so K8s GC deletes it when the CR is deleted.
+// Wrapped in RetryOnConflict so a racing writer (or owner-reference reconciler)
+// bumping the resourceVersion mid-update doesn't drop the mapping.
 func writeMappingConfigMap(ctx context.Context, c client.Client, namespace, cbName, digest string, raw []byte, ownerRef metav1.OwnerReference) error {
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      MappingConfigMapName(cbName),
-			Namespace: namespace,
-		},
-	}
-	_, err := controllerutil.CreateOrUpdate(ctx, c, cm, func() error {
-		cm.Labels = map[string]string{
-			"armada.ai/configbundle": cbName,
-			"armada.ai/component":    "mapping",
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      MappingConfigMapName(cbName),
+				Namespace: namespace,
+			},
 		}
-		cm.OwnerReferences = []metav1.OwnerReference{ownerRef}
-		cm.Data = map[string]string{
-			"digest":       digest,
-			"mapping.json": string(raw),
-		}
-		return nil
+		_, err := controllerutil.CreateOrUpdate(ctx, c, cm, func() error {
+			cm.Labels = map[string]string{
+				"armada.ai/configbundle": cbName,
+				"armada.ai/component":    "mapping",
+			}
+			cm.OwnerReferences = []metav1.OwnerReference{ownerRef}
+			cm.Data = map[string]string{
+				"digest":       digest,
+				"mapping.json": string(raw),
+			}
+			return nil
+		})
+		return err
 	})
-	return err
 }
 
 // readMappingConfigMap reads the mapping ConfigMap for a ConfigBundle.

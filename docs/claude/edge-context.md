@@ -165,6 +165,7 @@ Listens on `CB_CONTROLLER_PORT` (default `:8095`).
 - **Divergence tracking is on ConfigBundle CR managedFields only** — do not inspect child CR managedFields for divergence. The ConfigBundle CR is the single source of divergence truth.
 - **Decomposition must be idempotent** — applying the same ConfigBundle manifest twice must produce the same child CRs with no side effects. SSA guarantees this if field managers are used correctly.
 - **Return 500 on apply failure** — a 500 response is visible in orb's import history, giving operators a clear audit trail. Do not swallow errors and return 200.
+- **Always wrap `Status().Update`/`Status().Patch` and spec writes on owned objects (e.g. the mapping ConfigMap) in `client-go/util/retry.RetryOnConflict`** — multiple writers race the same resourceVersion (ConsumeServer ↔ ConfigBundleReconciler's `ObservedGeneration` write is the canonical case). Without retry, a single losing race surfaces as a 409 in orb's import history and the write is dropped. Re-fetch inside the closure; do not re-submit the stale object.
 
 ---
 

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -349,6 +350,50 @@ var _ = Describe("ConsumeServer", func() {
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter, Namespace: ns}, &cb)).To(Succeed())
 		Expect(cb.Spec.Servers).To(BeEmpty())
+	})
+
+	It("retries status update on conflict against the reconciler's ObservedGeneration write", func() {
+		// Regression: ConsumeServer's Status().Update races the
+		// ConfigBundleReconciler's ObservedGeneration write. Without
+		// RetryOnConflict, the losing writer returned "the object has been
+		// modified" and the work was dropped. Two concurrent applies mirror
+		// the realistic production race (dispatch + reconciler).
+		const datacenter = "colo"
+		body := testManifest(datacenter,
+			armadav1.ServerSpec{OrbID: "colo:srv-3rk3v64", ServiceTag: "3RK3V64", Hostname: ptr.To("retry-r740-01"), OobIP: ptr.To("10.0.0.1")},
+		)
+
+		// Seed the CR so concurrent applies operate on an existing object.
+		// This also drives the reconciler so its ObservedGeneration write
+		// will race the subsequent applies.
+		Expect(server.applyManifest(ctx, body, "sha256:seed", "import-seed")).To(Succeed())
+
+		const goroutines = 2
+		var wg sync.WaitGroup
+		errCh := make(chan error, goroutines)
+		for i := range goroutines {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				errCh <- server.applyManifest(ctx,
+					body,
+					fmt.Sprintf("sha256:digest-%d", idx),
+					fmt.Sprintf("import-%d", idx),
+				)
+			}(i)
+		}
+		wg.Wait()
+		close(errCh)
+
+		for err := range errCh {
+			Expect(err).NotTo(HaveOccurred(),
+				"applyManifest must not surface IsConflict after retry")
+		}
+
+		var final armadav1.ConfigBundle
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter, Namespace: ns}, &final)).To(Succeed())
+		Expect(final.Status.LastAppliedDigest).To(HavePrefix("sha256:digest-"),
+			"status must reflect one of the concurrent writers")
 	})
 })
 

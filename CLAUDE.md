@@ -91,6 +91,7 @@ Architecture decisions with full rationale. Read when the context would otherwis
 | Divergence `when` field semantics | `docs/decisions/004-divergence-when-semantics.md` |
 | Divergence mapping layer (D2 decision) | `docs/decisions/005-divergence-mapping-layer.md` |
 | Takeover pipeline ordering in consume handler | `docs/decisions/006-divergence-takeover-pipeline.md` |
+| Releasing stale managedFields claims after takeover | `docs/decisions/008-managedfields-release.md` |
 | OCI bundler pipeline, ConfigBundle integration | `~/armada/orbital/docs/configbundle-integration.md` |
 | Divergence contract (cb-controller obligations) | `docs/plans/divergence-cb-controller-contract.md` |
 
