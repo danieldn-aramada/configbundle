@@ -47,8 +47,9 @@ type Config struct {
 	Namespace                  string        `envconfig:"NAMESPACE"                   default:"default"`
 	CBControllerPort           string        `envconfig:"CB_CONTROLLER_PORT"          default:":8095"`
 	OrbDivergenceIntakeURL     string        `envconfig:"ORB_DIVERGENCE_INTAKE_URL"   default:"http://localhost:8010/api/v1/divergence"`
-	DivergenceReporterEnabled  bool          `envconfig:"DIVERGENCE_REPORTER_ENABLED" default:"true"`
-	DivergenceReporterDebounce time.Duration `envconfig:"DIVERGENCE_REPORTER_DEBOUNCE" default:"5s"`
+	DivergenceReporterEnabled   bool          `envconfig:"DIVERGENCE_REPORTER_ENABLED"   default:"true"`
+	DivergenceReporterDebounce  time.Duration `envconfig:"DIVERGENCE_REPORTER_DEBOUNCE"  default:"5s"`
+	DivergenceReporterHeartbeat time.Duration `envconfig:"DIVERGENCE_REPORTER_HEARTBEAT" default:"5m"`
 }
 
 var (
@@ -208,6 +209,7 @@ func main() {
 		controller.WithDivergenceNamespace(cfg.Namespace),
 		controller.WithDivergenceEnabled(cfg.DivergenceReporterEnabled),
 		controller.WithDivergenceDebounce(cfg.DivergenceReporterDebounce),
+		controller.WithDivergenceHeartbeat(cfg.DivergenceReporterHeartbeat),
 	)
 	if err := reporter.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to register DivergenceReporter")

@@ -15,11 +15,12 @@ type OrbitalQuerier interface {
 	QueryDataCenter(ctx context.Context, orbID string) ([]DataCenterResult, error)
 }
 
-// ResolutionQuerier fetches pending takeover and omission resolutions from Orbital.
-// Takeover (accept + force) is one-shot: orbital returns cb_consumed=false rows
-// and expects the bundler to mark them consumed after a successful publish.
-// Omissions (ignore) are persistent: returned on every bundle build until the
-// resolution row is deleted; never marked consumed.
+// ResolutionQuerier fetches active takeover and omission resolutions from Orbital.
+// Both queries return only currently-active resolutions — a resolution row in
+// orbital lives 1:1 with the underlying DivergenceEntry, so once the loop
+// closes (orb stops reporting the divergence) the resolution disappears from
+// the query results too. The bundler does NOT mark resolutions consumed —
+// orbital's source of truth is what it observes, not what consumers assert.
 type ResolutionQuerier interface {
 	QueryPendingForce(ctx context.Context) ([]PendingForceResolution, error)
 	QueryOmissions(ctx context.Context) ([]Omission, error)
@@ -183,7 +184,6 @@ func (c *HTTPOrbitalClient) QueryPendingForce(ctx context.Context) ([]PendingFor
 	q := req.URL.Query()
 	q.Add("action", "accept")
 	q.Add("action", "reject")
-	q.Set("propagated", "false")
 	req.URL.RawQuery = q.Encode()
 
 	resp, err := c.HTTPClient.Do(req)

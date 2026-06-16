@@ -11,6 +11,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	armadav1 "github.com/armada/configbundle/api/v1"
+	"github.com/armada/configbundle/bundle"
 )
 
 func TestExtractAdminPaths_NoAdminEntries(t *testing.T) {
@@ -183,14 +184,12 @@ func TestResolveValue(t *testing.T) {
 	}
 }
 
-func testMapping(t *testing.T) *Mapping {
+func testMapping(t *testing.T) *bundle.MappingPayload {
 	t.Helper()
 	m, err := ParseMapping([]byte(`{
 		"bundleDigest": "sha256:abc",
-		"items": [
-			{"path": "spec", "orbId": "colo:colo-galleon", "type": "DataCenter"},
-			{"path": "spec.servers[orbId=colo:srv-3rk3v64]", "orbId": "colo:srv-001", "type": "Server"},
-			{"path": "spec.servers[orbId=colo:srv-3rk3v64].idrac", "orbId": "colo:srv-001-idrac", "type": "IdracSettings"}
+		"rules": [
+			{"listField": "spec.servers", "itemKey": "orbId", "field": "idrac", "type": "IdracSettings", "orbIdSuffix": "-idrac"}
 		]
 	}`))
 	if err != nil {
@@ -316,8 +315,8 @@ func TestExtractOverrides_WithDivergence(t *testing.T) {
 	}
 
 	o := overrides[0]
-	if o.OrbID != "colo:srv-001-idrac" {
-		t.Errorf("orbId: got %q, want colo:srv-001-idrac", o.OrbID)
+	if o.OrbID != "colo:srv-3rk3v64-idrac" {
+		t.Errorf("orbId: got %q, want colo:srv-3rk3v64-idrac", o.OrbID)
 	}
 	if o.Field != "sshEnabled" {
 		t.Errorf("field: got %q, want sshEnabled", o.Field)

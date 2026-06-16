@@ -19,13 +19,113 @@ import (
 	armadav1 "github.com/armada/configbundle/api/v1"
 )
 
-// SetupWithManager registers DivergenceReporter as a controller that watches ConfigBundle CRs.
+// SetupWithManager registers DivergenceReporter as a controller that watches ConfigBundle CRs,
+// a one-shot bootstrap Runnable that rehydrates lastManifests from per-CR ConfigMaps at
+// startup (so restarts don't lose the intent baseline), and (when enabled) a periodic
+// heartbeat that re-syncs the per-CR posted-hash cache.
 func (r *DivergenceReporter) SetupWithManager(mgr ctrl.Manager) error {
+	if r.enabled {
+		if err := mgr.Add(&lastManifestLoader{reporter: r}); err != nil {
+			return fmt.Errorf("register last-manifest loader: %w", err)
+		}
+	}
+	if r.enabled && r.heartbeatInterval > 0 {
+		if err := mgr.Add(&divergenceHeartbeat{reporter: r}); err != nil {
+			return fmt.Errorf("register divergence heartbeat: %w", err)
+		}
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&armadav1.ConfigBundle{}).
 		WithEventFilter(r.predicate()).
 		Named("divergence-reporter").
 		Complete(r)
+}
+
+// lastManifestLoader is a one-shot manager.Runnable that rehydrates the
+// reporter's in-memory lastManifests map from each ConfigBundle's per-CR
+// ConfigMap at startup. Runs once after the manager's cache syncs and returns.
+// Without this, every controller restart opens a cold-start window where the
+// reporter has no intent baseline and either skips POSTs (after my earlier
+// guard) or wipes orb's state (pre-guard) — until the next bundle dispatch.
+type lastManifestLoader struct {
+	reporter *DivergenceReporter
+}
+
+func (l *lastManifestLoader) Start(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithName("divergence-reporter").WithName("bootstrap")
+	var list armadav1.ConfigBundleList
+	if err := l.reporter.Client.List(ctx, &list, client.InNamespace(l.reporter.namespace)); err != nil {
+		logger.Info("list ConfigBundles failed; lastManifests will rely on next dispatch", "err", err.Error())
+		return nil
+	}
+	loaded := 0
+	for _, cb := range list.Items {
+		spec, err := readLastAppliedSpec(ctx, l.reporter.Client, l.reporter.namespace, cb.Name)
+		if err != nil {
+			logger.Info("read last-applied-spec failed", "configbundle", cb.Name, "err", err.Error())
+			continue
+		}
+		if spec == nil {
+			continue
+		}
+		l.reporter.SetLastManifest(cb.Name, *spec)
+		loaded++
+	}
+	logger.Info("rehydrated lastManifests", "configbundles", len(list.Items), "loaded", loaded)
+	return nil
+}
+
+// divergenceHeartbeat is a manager.Runnable that ticks every reporter.heartbeatInterval,
+// lists ConfigBundles in the configured namespace, clears each CR's lastPostedHash entry,
+// and triggers a reconcile. Bounds the staleness window for the "orb wipe" failure mode —
+// orb's persistent divergence store can be lost (PVC failure, manual wipe, fresh edge
+// deploy) and the reporter's in-memory hash cache would otherwise dedup the post
+// forever because no managedFields event fires to invalidate it.
+type divergenceHeartbeat struct {
+	reporter *DivergenceReporter
+}
+
+func (h *divergenceHeartbeat) Start(ctx context.Context) error {
+	t := time.NewTicker(h.reporter.heartbeatInterval)
+	defer t.Stop()
+	logger := log.FromContext(ctx).WithName("divergence-reporter").WithName("heartbeat")
+	logger.Info("heartbeat started", "interval", h.reporter.heartbeatInterval)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			h.tick(ctx, logger)
+		}
+	}
+}
+
+func (h *divergenceHeartbeat) tick(ctx context.Context, logger logrLogger) {
+	var list armadav1.ConfigBundleList
+	if err := h.reporter.Client.List(ctx, &list, client.InNamespace(h.reporter.namespace)); err != nil {
+		logger.Info("list ConfigBundles failed", "err", err.Error())
+		return
+	}
+	if len(list.Items) == 0 {
+		return
+	}
+	// Clear the dedup cache for every CR so the next reconcile re-posts even if
+	// the override set is unchanged. The actual re-post fires below.
+	h.reporter.mu.Lock()
+	for _, cb := range list.Items {
+		delete(h.reporter.lastPostedHash, types.NamespacedName{Name: cb.Name, Namespace: cb.Namespace})
+	}
+	h.reporter.mu.Unlock()
+	// Trigger reconcile for each CR. Direct call bypasses the work queue —
+	// acceptable here because we ARE the periodic re-sync; there's no event
+	// debouncing to honor.
+	for _, cb := range list.Items {
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cb.Name, Namespace: cb.Namespace}}
+		if _, err := h.reporter.Reconcile(ctx, req); err != nil {
+			logger.Info("reconcile failed", "configbundle", cb.Name, "err", err.Error())
+		}
+	}
+	logger.Info("heartbeat tick complete", "configbundles", len(list.Items))
 }
 
 // Reconcile is called when a ConfigBundle CR's local:* managed fields change.
@@ -65,8 +165,18 @@ func (r *DivergenceReporter) Reconcile(ctx context.Context, req reconcile.Reques
 	warnNonConformingManagers(logger, cb.Name, cb.ManagedFields)
 
 	r.lastManifestsMu.RLock()
-	lastManifest := r.lastManifests[cb.Name]
+	lastManifest, haveLastManifest := r.lastManifests[cb.Name]
 	r.lastManifestsMu.RUnlock()
+
+	// Cold-start guard: without a lastManifest we don't know what the intent
+	// values are, so every local:admin claim looks "intent-absent" and
+	// extractOverrides returns nil. Posting nil to orb is REPLACE-not-merge —
+	// it would wipe orb's last-known good divergence set. Skip until the next
+	// orb-import dispatch (consume.go) populates lastManifests for this CR.
+	if !haveLastManifest {
+		logger.Info("no lastManifest yet (controller cold start, awaiting next bundle import); skipping post to avoid wiping orb's state", "configbundle", req.Name)
+		return reconcile.Result{}, nil
+	}
 
 	overrides := r.extractOverrides(&cb, mapping, lastManifest)
 	payload := DivergencePayload{Overrides: overrides}

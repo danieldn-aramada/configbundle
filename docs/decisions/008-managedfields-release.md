@@ -43,10 +43,49 @@ A JSON Patch with `op: remove` against `/metadata/managedFields/N/fieldsV1/...` 
 
 The tradeoff is implementation complexity: the Apply body must be reconstructed from each manager's current claims (live spec values at the paths they own), then submitted as that manager. The body must:
 
-- Include the listMapKey (`orbId`) for each server entry the manager claims (so SSA matches the existing list element).
+- Include the listMapKey (`orbId`) for server entries where the manager retains at least one non-takeover claim (so SSA can match the entry and preserve those claims).
 - Include all the manager's *other* claimed fields with their current live values (so release-on-omit doesn't strip claims the manager legitimately retains — pending divergences, Ignore-resolved fields).
 - OMIT the takeover-target fields (so release-on-omit strips just those).
+- OMIT the entire server entry — including its listMapKey — when *every* leaf the manager held on that server was a takeover target. Including just `{orbId: X}` would preserve the listMapKey claim and leave a residual "manager touched this entry" marker in `managedFields`, violating the "Accept/Reject = full release" semantic. With the entry absent from the body, SSA's release-on-omit strips the entry-presence marker (`".":{}`) and the listMapKey (`f:orbId:{}`) too — leaving zero residual ownership for that server. (See **Refinement** below.)
 - NOT include any field the manager doesn't own (so this Apply doesn't extend the manager's claims). In particular, do **not** include `serviceTag` even though it's CRD-Required: K8s validates Required-fields against the merged final state, not the individual Apply body. cb-controller's own claim on `serviceTag` keeps it present in the object.
+
+### Refinement (2026-06-15): full-release for entries with no surviving claims
+
+The first version of `reconstructServerList` always included `{orbId: X}` for any server the manager touched, on the theory that the listMapKey was structurally required for SSA to identify the entry. That was correct *if* you wanted to preserve claims on other leaves of that entry — but wrong when **all** of the manager's leaves on that entry were takeover targets. In that case the entry remained in the release body as `{orbId: X}`, SSA recorded "manager owns orbId + entry-presence marker," and `kubectl get cb --show-managed-fields | grep local:admin` kept showing the manager even though every meaningful claim had been released.
+
+Operationally this broke the documented audit invariant: "surviving `local:*` entries indicate actual unresolved or Ignore-resolved overrides." The residual listMapKey claim was a false positive.
+
+The fix in `reconstructServerList`:
+
+```go
+entryTouched := reconstructServerEntry(newEntry, srcEntry, keyOwnedMap, excludedFields)
+if len(newEntry) == 1 {  // only orbId, no leaves left
+    continue              // omit the entry entirely; SSA's release-on-omit
+                          // strips the listMapKey + entry-presence marker too
+}
+out = append(out, newEntry)
+```
+
+Note this is consistent with orbital's three-action semantic: a server fully resolved through Accept and/or Reject leaves no residue. A server with at least one Ignore-resolved or pending field retains its listMapKey claim *because* it retains real claims on that entry — the listMapKey is then load-bearing for those other claims.
+
+**Companion fix: omit `spec` from the release body when `newSpec` is empty.**
+
+The entry-level fix above only addressed the *contents* of `spec.servers[]`. When every server entry was fully-released (all servers in the manager's claims had only takeover-target leaves), `reconstructApplyExcluding` returned `newSpec = {}`. The Apply still included `"spec": {}`, which made SSA record `f:spec: {}` for that manager — a top-level "I claim the spec object itself" marker. `kubectl --show-managed-fields | grep local:admin` then *still* reported the manager, even though every individual leaf, listMapKey, and entry-presence marker had been released.
+
+The fix in `releaseOtherClaims`:
+
+```go
+applyObj := map[string]any{
+    "apiVersion": ...,
+    "kind":       "ConfigBundle",
+    "metadata":   map[string]any{"name": ..., "namespace": ...},
+}
+if len(newSpec) > 0 {
+    applyObj["spec"] = newSpec  // include only when non-empty
+}
+```
+
+With `spec` absent from the Apply body, SSA's release-on-omit strips the `f:spec` claim along with everything under it. The manager entry disappears from `managedFields` entirely. This closes the audit-invariant gap for the "all servers fully released" case.
 
 The Apply must use an `unstructured.Unstructured` body rather than a typed `armadav1.ConfigBundle` — the typed struct would serialize `spec.datacenter` as an empty string (no `json:omitempty`), which would extend the manager's claims to a field cb-controller already owns and fail with a conflict.
 
@@ -90,13 +129,13 @@ If the release fails (rare: concurrent reconcile, CRD validation regression), `p
 
 Reconstruction helpers (all in `takeover.go`):
 - `reconstructApplyExcluding` — top-level spec rebuild.
-- `reconstructServerList` — list-map of servers; preserves the orbId listMapKey.
+- `reconstructServerList` — list-map of servers; preserves the orbId listMapKey ONLY when the entry retains at least one non-takeover leaf; otherwise omits the entry entirely.
 - `reconstructServerEntry` — single server entry, handles top-level fields and recurses into idrac.
 - `reconstructIdracExcluding` — leaf-level idrac field rebuild with the exclusion check.
 
 Tests: `TestReconstructApplyExcluding` in `takeover_test.go` covers:
 - Surgical release: target claim omitted, other claims preserved with live values.
-- Manager claims only the takeover target: idrac key absent in output, orbId preserved (listMapKey requirement).
+- Manager's only claim is a takeover target: **server entry fully omitted from release body** (releases listMapKey + entry-presence marker too).
 - Manager doesn't claim any takeover target: `touched=false` (caller skips the Apply).
 - Top-level Server field as takeover target.
 
@@ -119,7 +158,23 @@ INFO  consume   async apply succeeded
 local:admin claims: {".":{}, "f:idrac":{"f:dhcpEnabled":{}}, "f:orbId":{}}
 ```
 
-`sshEnabled` released. `dhcpEnabled` preserved. No new fields added (no `serviceTag` injection). `f:idrac` still present because `dhcpEnabled` still lives under it.
+`sshEnabled` released. `dhcpEnabled` preserved (Ignore-resolved or pending). No new fields added (no `serviceTag` injection). `f:idrac` still present because `dhcpEnabled` still lives under it. `f:orbId` and `.: {}` markers preserved because the entry retains a real claim (`dhcpEnabled`).
+
+**Refinement scenario (2026-06-15): all claims are takeover targets.**
+
+Before:
+```
+local:admin claims: {".":{}, "f:idrac":{"f:sshEnabled":{}, "f:ipmiEnabled":{}}, "f:orbId":{}}
+```
+
+Dispatch with both `sshEnabled` and `ipmiEnabled` in `spec.takeover[]` (Accept + Reject respectively). After takeover with the full-release fix:
+
+```
+$ kubectl get cb colo-galleon -o jsonpath='{.metadata.managedFields[?(@.manager=="local:admin")]}'
+# (empty — no managedField entry for local:admin at all)
+```
+
+The server entry is omitted entirely from the release body; SSA's release-on-omit strips the listMapKey, the entry-presence marker, and the leaf claims in one pass. Operationally, this is the difference between "the controller technically released the override values but kept structural residue" (confusing) and "the override is fully resolved, end of story" (the intent).
 
 ## Related
 

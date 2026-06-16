@@ -19,17 +19,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	armadav1 "github.com/armada/configbundle/api/v1"
+	"github.com/armada/configbundle/bundle"
 )
 
 // DivergenceReporter is a controller-runtime reconciler that watches ConfigBundle CRs
 // for changes in "local:*" field managers and reports divergences to orb's intake.
 type DivergenceReporter struct {
-	Client         client.Client
-	HTTPClient     *http.Client
-	intakeURL      string
-	namespace      string
-	debounceWindow time.Duration
-	enabled        bool
+	Client            client.Client
+	HTTPClient        *http.Client
+	intakeURL         string
+	namespace         string
+	debounceWindow    time.Duration
+	heartbeatInterval time.Duration
+	enabled           bool
 
 	mu             sync.Mutex
 	lastEventAt    map[types.NamespacedName]time.Time
@@ -54,21 +56,31 @@ func WithDivergenceDebounce(d time.Duration) DivergenceReporterOption {
 	return func(r *DivergenceReporter) { r.debounceWindow = d }
 }
 
+// WithDivergenceHeartbeat sets the periodic re-send interval. On each tick the
+// reporter lists ConfigBundles, clears the per-CR posted-hash cache, and triggers
+// a reconcile. Bounds the staleness window when orb's persistent state is wiped
+// (the reporter's in-memory hash cache would otherwise dedup the post forever
+// because no managedFields event fires to invalidate it). 0 disables.
+func WithDivergenceHeartbeat(d time.Duration) DivergenceReporterOption {
+	return func(r *DivergenceReporter) { r.heartbeatInterval = d }
+}
+
 func WithDivergenceEnabled(enabled bool) DivergenceReporterOption {
 	return func(r *DivergenceReporter) { r.enabled = enabled }
 }
 
 func NewDivergenceReporter(c client.Client, opts ...DivergenceReporterOption) *DivergenceReporter {
 	r := &DivergenceReporter{
-		Client:         c,
-		HTTPClient:     &http.Client{Timeout: 10 * time.Second},
-		intakeURL:      "http://orb:8010/api/v1/divergence",
-		namespace:      "configbundle-system",
-		debounceWindow: 5 * time.Second,
-		enabled:        false,
-		lastEventAt:    make(map[types.NamespacedName]time.Time),
-		lastPostedHash: make(map[types.NamespacedName][32]byte),
-		lastManifests:  make(map[string]armadav1.ConfigBundleSpec),
+		Client:            c,
+		HTTPClient:        &http.Client{Timeout: 10 * time.Second},
+		intakeURL:         "http://orb:8010/api/v1/divergence",
+		namespace:         "configbundle-system",
+		debounceWindow:    5 * time.Second,
+		heartbeatInterval: 5 * time.Minute,
+		enabled:           false,
+		lastEventAt:       make(map[types.NamespacedName]time.Time),
+		lastPostedHash:    make(map[types.NamespacedName][32]byte),
+		lastManifests:     make(map[string]armadav1.ConfigBundleSpec),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -121,7 +133,7 @@ func (r *DivergenceReporter) postToOrb(ctx context.Context, payload DivergencePa
 // owned by any "local:<id>" field manager, translates K8s paths to orbital-native
 // entries via the mapping, and returns the divergence set. Each override carries
 // the actual field-manager string (e.g. "local:daniel") in Who.
-func (r *DivergenceReporter) extractOverrides(cb *armadav1.ConfigBundle, mapping *Mapping, lastManifest armadav1.ConfigBundleSpec) []OverrideEntry {
+func (r *DivergenceReporter) extractOverrides(cb *armadav1.ConfigBundle, mapping *bundle.MappingPayload, lastManifest armadav1.ConfigBundleSpec) []OverrideEntry {
 	adminPaths := extractAdminPaths(cb.ManagedFields)
 	if len(adminPaths) == 0 {
 		return nil

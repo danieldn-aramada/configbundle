@@ -119,12 +119,32 @@ Listens on `CB_CONTROLLER_PORT` (default `:8095`).
 2. **Set ownerReferences** on child CRs so deletion cascades when ConfigBundle is deleted
 3. **Update ConfigBundle CR status**: `phase`, `Reconciled` condition
 
-### Divergence Reporter (`ctrl.Reconciler`) — event-driven with debounce
+### Divergence Reporter (`ctrl.Reconciler`) — event-driven with debounce + heartbeat + bootstrap
 1. **Predicate fires on `local:*` managedFields change** — compares `FieldsV1.Raw` bytes for any `local:*` manager between old and new CR; non-local-admin changes are ignored
 2. **Debounce:** `lastEventAt[key]` set on predicate match; reconciler returns `RequeueAfter(remaining)` until `DIVERGENCE_REPORTER_DEBOUNCE` (default `5s`) of quiet time has elapsed
 3. **Compute overrides** from current CR's `managedFields` vs last-applied manifest; read mapping from `<cb-name>-mapping` ConfigMap
-4. **Content-hash dedup:** SHA-256 of canonical JSON; skip POST if override set is unchanged since last POST (in-memory; resets on restart)
-5. **POST the full override set** to orb's divergence intake (`ORB_DIVERGENCE_INTAKE_URL`) — replace-not-merge semantics; exponential backoff via controller-runtime work queue on error
+4. **Cold-start guard:** if `lastManifests[cb.Name]` has no entry (controller hasn't seen a manifest dispatch for this CR yet), **skip the POST** — posting nil would wipe orb's store (replace-not-merge). Wait for next bundle dispatch to populate intent, OR for the bootstrap loader to rehydrate from K8s state (see below).
+5. **Content-hash dedup:** SHA-256 of canonical JSON; skip POST if override set is unchanged since last POST (in-memory)
+6. **POST the full override set** to orb's divergence intake (`ORB_DIVERGENCE_INTAKE_URL`) — replace-not-merge semantics; exponential backoff via controller-runtime work queue on error
+
+#### Restart durability — three guards work together
+
+The reporter's `lastManifests` (intent baseline) and `lastPostedHash` (dedup cache) were originally in-memory only, causing two failure modes:
+
+| Failure | Without guards | With guards |
+|---|---|---|
+| **Controller restart loses intent baseline** | Reporter posts empty set → wipes orb | Bootstrap rehydrates `lastManifests` from per-CR ConfigMap on startup; cold-start guard skips POST if still empty |
+| **orb store wiped (PVC failure, fresh edge)** | Controller's dedup cache says "already posted" → never re-sends → orb stays empty | Heartbeat ticker clears dedup cache periodically → next reconcile re-posts |
+
+**The three guards:**
+
+1. **Persistence (write side):** On every successful manifest apply (`consume.go`), the spec is written to the per-CR ConfigMap (`<cb-name>-mapping`) under `last-applied-spec.yaml`. Same CM as the path-mapping; lifecycle tied via OwnerReference.
+
+2. **Bootstrap rehydration (read side):** At controller startup, `lastManifestLoader` (a `manager.Runnable`) lists ConfigBundles in the configured namespace, reads each one's persisted spec, and calls `SetLastManifest`. Log line: `divergence-reporter.bootstrap rehydrated lastManifests {"configbundles": N, "loaded": M}`.
+
+3. **Heartbeat ticker:** Every `DIVERGENCE_REPORTER_HEARTBEAT` (default `5m`), `divergenceHeartbeat` (a `manager.Runnable`) lists CRs, clears `lastPostedHash` for each, and triggers `Reconcile` directly. Bounds orb-wipe recovery latency to one interval. Set `0` to disable.
+
+The cold-start guard (step 4 above) is the safety net: if persistence/bootstrap both failed somehow and `lastManifests` is empty, the reporter refuses to wipe orb. It waits for a real intent dispatch.
 
 ---
 
@@ -135,6 +155,7 @@ Listens on `CB_CONTROLLER_PORT` (default `:8095`).
 | `CB_CONTROLLER_PORT` | `:8095` | Listen address for `POST /dispatch` (ConsumeServer) |
 | `ORB_DIVERGENCE_INTAKE_URL` | `http://localhost:8010/api/v1/divergence` | Where the Divergence Reporter POSTs override entries |
 | `DIVERGENCE_REPORTER_DEBOUNCE` | `5s` | Quiet window after last `local:*` managedFields change before reporting |
+| `DIVERGENCE_REPORTER_HEARTBEAT` | `5m` | Periodic re-send interval. On each tick, clears the per-CR posted-hash cache and triggers reconcile. Bounds recovery latency for the "orb wipe" failure mode. Set `0` to disable. |
 | `DIVERGENCE_REPORTER_ENABLED` | `true` | Set `false` to disable all divergence POSTs (local dev without orb) |
 | `NAMESPACE` | `default` | Namespace the ConsumeServer watches for ConfigBundle CRs |
 

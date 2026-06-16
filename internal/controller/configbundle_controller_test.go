@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	armadav1 "github.com/armada/configbundle/api/v1"
+	"github.com/armada/configbundle/bundle"
 )
 
 var _ = Describe("ConfigBundle Controller", func() {
@@ -598,7 +599,7 @@ var _ = Describe("DivergenceReporter", func() {
 
 		var found *OverrideEntry
 		for i := range overrides {
-			if overrides[i].OrbID == "colo:srv-001-idrac" && overrides[i].Field == "sshEnabled" {
+			if overrides[i].OrbID == "colo:srv-3rk3v64-idrac" && overrides[i].Field == "sshEnabled" {
 				found = &overrides[i]
 				break
 			}
@@ -735,7 +736,7 @@ var _ = Describe("DivergenceReporter", func() {
 
 		var sshOverride *OverrideEntry
 		for i := range capturedPayload.Overrides {
-			if capturedPayload.Overrides[i].OrbID == "colo:srv-001-idrac" && capturedPayload.Overrides[i].Field == "sshEnabled" {
+			if capturedPayload.Overrides[i].OrbID == "colo:srv-3rk3v64-idrac" && capturedPayload.Overrides[i].Field == "sshEnabled" {
 				sshOverride = &capturedPayload.Overrides[i]
 				break
 			}
@@ -828,7 +829,7 @@ var _ = Describe("DispatchServer mapping via ConfigMap", func() {
 		// Read it back with readMappingConfigMap and verify parse.
 		m, err := readMappingConfigMap(ctx, k8sClient, ns, datacenter)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(m.Items).NotTo(BeEmpty())
+		Expect(m.Rules).NotTo(BeEmpty())
 	})
 
 	It("sets a blocking OwnerReference on the ConfigMap pointing to the ConfigBundle CR", func() {
@@ -1067,18 +1068,18 @@ var _ = Describe("Takeover", func() {
 	})
 })
 
-// envtestMapping returns a Mapping matching the server entries used in envtests.
+// envtestMapping returns a MappingPayload matching the server entries used in envtests.
+// One rule per nested type (today: just IdracSettings). DC and Server orbIds
+// live in the spec directly — they don't appear in the mapping anymore.
 func envtestMapping(t interface {
 	Helper()
 	Fatalf(string, ...interface{})
-}) *Mapping {
+}) *bundle.MappingPayload {
 	t.Helper()
 	m, err := ParseMapping([]byte(`{
 		"bundleDigest": "sha256:test-digest",
-		"items": [
-			{"path": "spec", "orbId": "colo:colo-galleon", "type": "DataCenter"},
-			{"path": "spec.servers[orbId=colo:srv-3rk3v64]", "orbId": "colo:srv-001", "type": "Server"},
-			{"path": "spec.servers[orbId=colo:srv-3rk3v64].idrac", "orbId": "colo:srv-001-idrac", "type": "IdracSettings"}
+		"rules": [
+			{"listField": "spec.servers", "itemKey": "orbId", "field": "idrac", "type": "IdracSettings", "orbIdSuffix": "-idrac"}
 		]
 	}`))
 	if err != nil {

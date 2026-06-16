@@ -187,15 +187,25 @@ func (s *ConsumeServer) releaseOtherClaims(ctx context.Context, fullSpec armadav
 		// owns and the Apply would fail with a 409 conflict. With unstructured,
 		// only the manager's actually-claimed fields appear in the request body,
 		// and SSA's release-on-omit handles the rest.
-		apply := &unstructured.Unstructured{Object: map[string]any{
+		//
+		// Omit "spec" entirely when newSpec is empty. Including spec:{} would
+		// make SSA record this manager as claiming the spec object itself
+		// (f:spec: {} in managedFields), so kubectl --show-managed-fields keeps
+		// reporting the manager even though every leaf was released. Omitting
+		// spec lets release-on-omit drop the f:spec claim too — zero residual
+		// ownership, manager entry disappears from managedFields.
+		applyObj := map[string]any{
 			"apiVersion": armadav1.GroupVersion.String(),
 			"kind":       "ConfigBundle",
 			"metadata": map[string]any{
 				"name":      fullSpec.Datacenter,
 				"namespace": s.namespace,
 			},
-			"spec": newSpec,
-		}}
+		}
+		if len(newSpec) > 0 {
+			applyObj["spec"] = newSpec
+		}
+		apply := &unstructured.Unstructured{Object: applyObj}
 		if err := s.Client.Patch(ctx, apply, client.Apply,
 			client.FieldOwner(mf.Manager),
 		); err != nil {
@@ -318,18 +328,29 @@ func reconstructServerList(
 		keyOwnedMap, _ := keyOwned.(map[string]any)
 
 		// Build the reconstructed server entry. orbId is the listMapKey — must
-		// be included for SSA to match the existing list element. We do NOT
-		// inject serviceTag here: CRD Required-field validation runs against
-		// the merged final state of the object, not the individual Apply body,
-		// and cb-controller's own field manager has already established
-		// serviceTag in the object. Including it here would silently extend
-		// this manager's claims to a field they didn't originally own.
+		// be included when we want SSA to match an existing list element to
+		// preserve its other claims. We do NOT inject serviceTag here: CRD
+		// Required-field validation runs against the merged final state of the
+		// object, not the individual Apply body, and cb-controller's own field
+		// manager has already established serviceTag in the object.
 		newEntry := map[string]any{"orbId": orbID}
 
 		excludedFields := excludeByServer[orbID]
 		entryTouched := reconstructServerEntry(newEntry, srcEntry, keyOwnedMap, excludedFields)
 		if entryTouched {
 			touched = true
+		}
+		// Full-release semantics: if Accept/Reject consumed ALL of this
+		// manager's leaves on the server, newEntry has only orbId. Omitting
+		// the entry from the release body lets SSA's release-on-omit strip
+		// the manager's claims on the listMapKey + entry-presence marker
+		// too — leaving zero residual ownership for this server. Without
+		// this, kubectl --show-managed-fields keeps reporting the manager
+		// even though every meaningful claim was released. orbital's
+		// semantic is "Accept/Reject release; Ignore preserves" — that has
+		// to mean nothing remains for fully-resolved servers.
+		if len(newEntry) == 1 {
+			continue
 		}
 		out = append(out, newEntry)
 	}

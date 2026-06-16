@@ -341,17 +341,32 @@ func (s *ConsumeServer) applyManifest(ctx context.Context, body []byte, digest, 
 		return fmt.Errorf("takeover: %w", takeoverErr)
 	}
 
-	// Record the last-applied manifest for divergence comparison.
+	// Record the last-applied manifest for divergence comparison — both in
+	// memory (fast path for the reporter) and durably in the CR's ConfigMap
+	// (survives controller restart). Persist failure is non-fatal: the
+	// in-memory state is still correct; only post-restart recovery degrades.
 	if s.reporter != nil {
 		s.reporter.SetLastManifest(spec.Datacenter, spec)
+		if err := writeLastAppliedSpec(ctx, s.Client, s.namespace, spec.Datacenter, spec); err != nil {
+			log.FromContext(ctx).WithName("consume").Info("persist last-applied-spec failed (non-fatal)", "err", err.Error())
+		}
 	}
 
-	// Re-read inside RetryOnConflict so each attempt works against a fresh
-	// resourceVersion. The ConfigBundleReconciler also writes ObservedGeneration
-	// in response to the SSA patch above; without this retry, that race surfaces
-	// as a 409 "the object has been modified" and the work is dropped.
+	// Re-read inside a retry loop that handles two distinct races:
+	//   - NotFound: the SSA Apply above created the CR via the API server, but
+	//     the controller-runtime cache hasn't seen the watch event yet, so
+	//     Client.Get returns NotFound. Typically resolves within a few hundred
+	//     ms. This is the first-import-after-kubectl-delete race that surfaces
+	//     downstream as a 409 from the mapping handler ("ConfigBundle not
+	//     found for digest") because lastAppliedDigest never gets set.
+	//   - Conflict: the ConfigBundleReconciler writes ObservedGeneration in
+	//     response to our SSA patch; concurrent status writes race on
+	//     resourceVersion. RetryOnConflict alone would handle this case but
+	//     misses NotFound, which is why we use OnError with both predicates.
 	var prev metav1.ConditionStatus
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err = retry.OnError(retry.DefaultBackoff, func(e error) bool {
+		return apierrors.IsNotFound(e) || apierrors.IsConflict(e)
+	}, func() error {
 		cur := &armadav1.ConfigBundle{}
 		if err := s.Client.Get(ctx, client.ObjectKeyFromObject(apply), cur); err != nil {
 			return err
@@ -365,7 +380,7 @@ func (s *ConsumeServer) applyManifest(ctx context.Context, body []byte, digest, 
 		return s.Client.Status().Update(ctx, cur)
 	})
 	if err != nil {
-		if apierrors.IsConflict(err) {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 			return fmt.Errorf("update ConfigBundle status gave up after retries: %w", err)
 		}
 		return fmt.Errorf("update ConfigBundle status: %w", err)

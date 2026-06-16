@@ -3,18 +3,16 @@ package controller
 import (
 	"strings"
 	"testing"
+
+	"github.com/armada/configbundle/bundle"
 )
 
-func newTestMapping(t *testing.T) *Mapping {
+func newTestMapping(t *testing.T) *bundle.MappingPayload {
 	t.Helper()
 	m, err := ParseMapping([]byte(`{
 		"bundleDigest": "sha256:abc",
-		"items": [
-			{"path": "spec", "orbId": "colo:colo-galleon", "type": "DataCenter"},
-			{"path": "spec.servers[orbId=colo:srv-3rk3v64]", "orbId": "colo:srv-001", "type": "Server"},
-			{"path": "spec.servers[orbId=colo:srv-3rk3v64].idrac", "orbId": "colo:srv-001-idrac", "type": "IdracSettings"},
-			{"path": "spec.servers[orbId=colo:srv-jl3pv82]", "orbId": "colo:srv-002", "type": "Server"},
-			{"path": "spec.servers[orbId=colo:srv-jl3pv82].idrac", "orbId": "colo:srv-002-idrac", "type": "IdracSettings"}
+		"rules": [
+			{"listField": "spec.servers", "itemKey": "orbId", "field": "idrac", "type": "IdracSettings", "orbIdSuffix": "-idrac"}
 		]
 	}`))
 	if err != nil {
@@ -23,9 +21,8 @@ func newTestMapping(t *testing.T) *Mapping {
 	return m
 }
 
-func TestResolve_LongestPrefixWins(t *testing.T) {
+func TestResolve_IdracField(t *testing.T) {
 	m := newTestMapping(t)
-
 	cases := []struct {
 		name      string
 		path      string
@@ -34,30 +31,16 @@ func TestResolve_LongestPrefixWins(t *testing.T) {
 		wantType  string
 	}{
 		{
-			name:      "idrac field resolves to IdracSettings orbId, not Server",
+			name:      "idrac sshEnabled resolves",
 			path:      "spec.servers[orbId=colo:srv-3rk3v64].idrac.sshEnabled",
-			wantOrbID: "colo:srv-001-idrac",
+			wantOrbID: "colo:srv-3rk3v64-idrac",
 			wantField: "sshEnabled",
 			wantType:  "IdracSettings",
 		},
 		{
-			name:      "top-level server field resolves to Server orbId",
-			path:      "spec.servers[orbId=colo:srv-3rk3v64].oobIP",
-			wantOrbID: "colo:srv-001",
-			wantField: "oobIP",
-			wantType:  "Server",
-		},
-		{
-			name:      "datacenter-level field resolves to DataCenter orbId",
-			path:      "spec.datacenter",
-			wantOrbID: "colo:colo-galleon",
-			wantField: "datacenter",
-			wantType:  "DataCenter",
-		},
-		{
-			name:      "second server resolves independently",
+			name:      "different server resolves independently",
 			path:      "spec.servers[orbId=colo:srv-jl3pv82].idrac.ipmiEnabled",
-			wantOrbID: "colo:srv-002-idrac",
+			wantOrbID: "colo:srv-jl3pv82-idrac",
 			wantField: "ipmiEnabled",
 			wantType:  "IdracSettings",
 		},
@@ -81,56 +64,56 @@ func TestResolve_LongestPrefixWins(t *testing.T) {
 	}
 }
 
-func TestResolve_NoPrefixMatch(t *testing.T) {
+func TestResolve_PathNotMatchingRule_Errors(t *testing.T) {
 	m := newTestMapping(t)
-	_, _, _, err := m.Resolve("status.foo")
-	if err == nil {
-		t.Fatal("expected error for unmatched path, got nil")
+	cases := []string{
+		"status.foo",                                          // not under spec
+		"spec.datacenter",                                     // top-level DC field (no rule today)
+		"spec.servers[orbId=colo:srv-3rk3v64].hostname",       // top-level Server field (no rule)
+		"spec.servers[orbId=colo:srv-3rk3v64].idrac",          // ConfigItem boundary, no leaf
+		"spec.servers[orbId=colo:srv-3rk3v64].idrac.foo.bar",  // leaf is deeper than one segment
 	}
-	if !strings.Contains(err.Error(), "no mapping prefix matches") {
-		t.Errorf("unexpected error: %v", err)
+	for _, p := range cases {
+		t.Run(p, func(t *testing.T) {
+			_, _, _, err := m.Resolve(p)
+			if err == nil {
+				t.Fatalf("expected error for %q, got nil", p)
+			}
+			if !strings.Contains(err.Error(), "no mapping rule matches") {
+				t.Errorf("unexpected error message: %v", err)
+			}
+		})
 	}
 }
 
-func TestResolve_RefusesShallowMatch(t *testing.T) {
+func TestResolveByOrbID_StripsSuffix(t *testing.T) {
 	m := newTestMapping(t)
-	_, _, _, err := m.Resolve("spec.clusters[clusterName=prod-1].config.someField")
-	if err == nil {
-		t.Fatal("expected error when shallow prefix would produce structured leaf, got nil")
+	rule, parent, ok := m.ResolveByOrbID("colo:srv-3rk3v64-idrac")
+	if !ok {
+		t.Fatal("expected match on -idrac suffix")
 	}
-	if !strings.Contains(err.Error(), "too shallow") {
-		t.Errorf("unexpected error: %v", err)
+	if parent != "colo:srv-3rk3v64" {
+		t.Errorf("parent: got %q, want colo:srv-3rk3v64", parent)
+	}
+	if rule.Type != "IdracSettings" {
+		t.Errorf("rule type: got %q, want IdracSettings", rule.Type)
 	}
 }
 
-func TestResolve_ExactPathIsRejected(t *testing.T) {
+func TestResolveByOrbID_UnknownSuffix(t *testing.T) {
 	m := newTestMapping(t)
-	_, _, _, err := m.Resolve("spec.servers[orbId=colo:srv-3rk3v64].idrac")
-	if err == nil {
-		t.Fatal("expected error for ConfigItem-boundary path, got nil")
+	if _, _, ok := m.ResolveByOrbID("colo:srv-3rk3v64-bios"); ok {
+		t.Error("no rule has -bios suffix; expected no match")
+	}
+	if _, _, ok := m.ResolveByOrbID("not-an-orbid"); ok {
+		t.Error("unsuffixed string must not match any rule")
 	}
 }
 
-func TestResolve_PrefixBoundaryDot(t *testing.T) {
-	m, err := ParseMapping([]byte(`{
-		"bundleDigest": "sha256:abc",
-		"items": [
-			{"path": "spec.servers[orbId=colo:srv-3rk3v64]", "orbId": "colo:srv-001"}
-		]
-	}`))
-	if err != nil {
-		t.Fatalf("ParseMapping: %v", err)
-	}
-	_, _, _, err = m.Resolve("spec.servers[orbId=colo:srv-3rk3v64z].field")
+func TestParseMapping_EmptyRules(t *testing.T) {
+	_, err := ParseMapping([]byte(`{"bundleDigest":"sha256:abc","rules":[]}`))
 	if err == nil {
-		t.Fatal("expected mismatch for prefix without dot boundary, got match")
-	}
-}
-
-func TestParseMapping_EmptyItems(t *testing.T) {
-	_, err := ParseMapping([]byte(`{"bundleDigest":"sha256:abc","items":[]}`))
-	if err == nil {
-		t.Fatal("expected error for empty items, got nil")
+		t.Fatal("expected error for empty rules, got nil")
 	}
 }
 
@@ -138,5 +121,15 @@ func TestParseMapping_InvalidJSON(t *testing.T) {
 	_, err := ParseMapping([]byte(`{not json`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
+	}
+}
+
+func TestParseMapping_RuleMissingField(t *testing.T) {
+	_, err := ParseMapping([]byte(`{
+		"bundleDigest":"sha256:abc",
+		"rules":[{"listField":"spec.servers","itemKey":"orbId","field":"idrac","type":"IdracSettings"}]
+	}`))
+	if err == nil {
+		t.Fatal("expected error for rule missing orbIdSuffix, got nil")
 	}
 }

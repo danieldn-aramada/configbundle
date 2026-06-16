@@ -185,7 +185,12 @@ func TestReconstructApplyExcluding(t *testing.T) {
 		}
 	})
 
-	t.Run("local:admin claims only takeover-target field — Apply has empty idrac", func(t *testing.T) {
+	t.Run("local:admin's only claim is a takeover target — server entry fully omitted (releases listMapKey too)", func(t *testing.T) {
+		// When Accept/Reject consumes EVERY leaf this manager owned on the server,
+		// the release body must NOT include the server entry at all. Including it
+		// with just {orbId: X} would preserve the listMapKey claim, leaving a
+		// residual "manager touched this entry" marker in managedFields — which
+		// violates orbital's "Accept/Reject = full release" semantic.
 		owned := unmarshalFields(t, `{
 			"f:servers": {
 				"k:{\"orbId\":\"colo:CWJHDX3\"}": {
@@ -200,18 +205,11 @@ func TestReconstructApplyExcluding(t *testing.T) {
 		}
 		out, touched := reconstructApplyExcluding(specMap, owned, exclude)
 		if !touched {
-			t.Fatal("expected touched=true")
+			t.Fatal("expected touched=true (excluded field was present)")
 		}
 		servers, _ := out["servers"].([]any)
-		entry := servers[0].(map[string]any)
-		// idrac shouldn't appear at all (no fields left to apply).
-		if idrac, has := entry["idrac"]; has {
-			if m, _ := idrac.(map[string]any); len(m) != 0 {
-				t.Errorf("idrac should be absent or empty, got %v", m)
-			}
-		}
-		if entry["orbId"] != "colo:CWJHDX3" {
-			t.Errorf("orbId still required as listMapKey")
+		if len(servers) != 0 {
+			t.Errorf("expected zero server entries in release body (entry fully released), got %d: %+v", len(servers), servers)
 		}
 	})
 

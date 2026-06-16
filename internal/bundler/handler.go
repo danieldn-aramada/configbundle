@@ -3,7 +3,6 @@ package bundler
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"reflect"
@@ -122,42 +121,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// MappingEntry is one path→orbId entry in the mapping layer.
-// Type carries the Orbital GraphQL type name so Orbital can dispatch
-// update{Type}(...) mutations on Accept.
-type MappingEntry struct {
-	Path  string `json:"path"`
-	OrbID string `json:"orbId"`
-	Type  string `json:"type"`
-}
-
-// MappingLayer is the mapping layer content written to the OCI artifact.
-type MappingLayer struct {
-	Items []MappingEntry `json:"items"`
-}
-
 // buildTakeover translates pending accept/reject-resolutions into TakeoverEntry values
-// using the mapping layer to resolve the field's orbId → owning server's orbId.
-// Resolutions whose orbId doesn't appear in the mapping are silently skipped —
+// using the mapping rules to recover the owning server's orbId from each
+// resolution's nested-entity orbId (e.g. "colo:GQK3V64-idrac" → "colo:GQK3V64").
+// Resolutions whose orbId doesn't match any mapping rule are silently skipped —
 // the resolution may belong to a different bundle or a stale entry.
-func buildTakeover(resolutions []PendingForceResolution, mapping MappingLayer) []armadav1.TakeoverEntry {
+func buildTakeover(resolutions []PendingForceResolution, mapping bundle.MappingPayload) []armadav1.TakeoverEntry {
 	if len(resolutions) == 0 {
 		return nil
 	}
-
-	orbIndex := make(map[string]MappingEntry, len(mapping.Items))
-	for _, item := range mapping.Items {
-		orbIndex[item.OrbID] = item
-	}
-
 	var entries []armadav1.TakeoverEntry
 	for _, res := range resolutions {
-		item, ok := orbIndex[res.OrbID]
+		_, serverOrbID, ok := mapping.ResolveByOrbID(res.OrbID)
 		if !ok {
-			continue
-		}
-		serverOrbID := extractServerOrbID(item.Path)
-		if serverOrbID == "" {
 			continue
 		}
 		entries = append(entries, armadav1.TakeoverEntry{
@@ -171,36 +147,24 @@ func buildTakeover(resolutions []PendingForceResolution, mapping MappingLayer) [
 
 // applyOmissions removes (orbId, field) pairs from spec for each ignore-resolution.
 // The orbId in the Omission identifies an Orbital ConfigItem (e.g. IdracSettings
-// owns idrac fields, Server owns top-level server fields). We resolve via the
-// mapping layer to find which server the field lives on, then nil out the
-// matching leaf — because IdracSpec/ServerSpec leaves are pointers with
-// omitempty (ADR-007), nil → absent from the serialized apply config → cb-controller
-// releases its claim → local:<id> remains sole manager.
+// owns idrac fields). We resolve via the mapping rules to find which server the
+// field lives on, then nil out the matching leaf — because IdracSpec/ServerSpec
+// leaves are pointers with omitempty (ADR-007), nil → absent from the serialized
+// apply config → cb-controller releases its claim → local:<id> remains sole manager.
 //
 // Unknown orbIds, fields, or missing server entries are silently skipped — the
 // resolution may belong to a different bundle or a stale entry.
-func applyOmissions(spec *armadav1.ConfigBundleSpec, omissions []Omission, mapping MappingLayer) {
+func applyOmissions(spec *armadav1.ConfigBundleSpec, omissions []Omission, mapping bundle.MappingPayload) {
 	if len(omissions) == 0 {
 		return
 	}
-
-	orbIndex := make(map[string]MappingEntry, len(mapping.Items))
-	for _, item := range mapping.Items {
-		orbIndex[item.OrbID] = item
-	}
-
 	serverIndex := make(map[string]*armadav1.ServerSpec, len(spec.Servers))
 	for i := range spec.Servers {
 		serverIndex[spec.Servers[i].OrbID] = &spec.Servers[i]
 	}
-
 	for _, om := range omissions {
-		item, ok := orbIndex[om.OrbID]
+		_, serverOrbID, ok := mapping.ResolveByOrbID(om.OrbID)
 		if !ok {
-			continue
-		}
-		serverOrbID := extractServerOrbID(item.Path)
-		if serverOrbID == "" {
 			continue
 		}
 		server, ok := serverIndex[serverOrbID]
@@ -236,45 +200,37 @@ func zeroStructFieldByJSONTag(v reflect.Value, jsonName string) bool {
 	return false
 }
 
-// extractServerOrbID pulls the server's orbId value from a mapping path.
-// e.g. "spec.servers[orbId=colo:srv-001].idrac" → "colo:srv-001"
-func extractServerOrbID(path string) string {
-	const prefix = "[orbId="
-	idx := strings.Index(path, prefix)
-	if idx < 0 {
-		return ""
-	}
-	rest := path[idx+len(prefix):]
-	end := strings.IndexByte(rest, ']')
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
-}
-
-// buildMapping produces the per-field path→orbId mapping from a DataCenterResult.
-// After the orbId-as-identity migration (docs/plans/server-identity-orbid.md),
-// the mapping layer carries ONLY entries for nested Orbital nodes that don't have
-// their own first-class identity in the K8s spec — IdracSettings today, future
-// nested config types (NetworkConfig, BIOSConfig, etc.). Datacenter and server
-// orbIds are in spec.orbId and spec.servers[].orbId respectively, not here.
-func buildMapping(dc DataCenterResult) MappingLayer {
-	var items []MappingEntry
-
+// buildMapping produces the structural identity-translation rules for a
+// DataCenterResult. After the orbId-as-identity migration
+// (docs/plans/server-identity-orbid.md), the mapping carries ONLY rules for
+// nested Orbital nodes that don't have their own first-class identity in the
+// K8s spec — IdracSettings today, future nested config types (NetworkConfig,
+// BIOSConfig, etc.). Datacenter and server orbIds live in spec.orbId and
+// spec.servers[].orbId respectively, not here.
+//
+// One rule per nested type, emitted iff at least one server in the result has
+// the nested entity populated. Naming convention: nested orbital entities are
+// "<parent-orbId><suffix>" — e.g. "colo:GQK3V64-idrac" lives under server
+// "colo:GQK3V64". The rule carries the suffix so consumers can derive parent
+// from child without re-querying orbital.
+func buildMapping(dc DataCenterResult) bundle.MappingPayload {
+	var rules []bundle.MappingRule
 	for _, s := range dc.Servers {
 		if s.Hostname == "" || s.OrbID == "" {
 			continue
 		}
 		if s.IdracSettings != nil && s.IdracSettings.OrbID != "" {
-			items = append(items, MappingEntry{
-				Path:  fmt.Sprintf("spec.servers[orbId=%s].idrac", s.OrbID),
-				OrbID: s.IdracSettings.OrbID,
-				Type:  "IdracSettings",
+			rules = append(rules, bundle.MappingRule{
+				ListField:   "spec.servers",
+				ItemKey:     "orbId",
+				Field:       "idrac",
+				Type:        "IdracSettings",
+				OrbIDSuffix: "-idrac",
 			})
+			break
 		}
 	}
-
-	return MappingLayer{Items: items}
+	return bundle.MappingPayload{Rules: rules}
 }
 
 // mapToSpec maps a GraphQL DataCenterResult to a ConfigBundleSpec.
