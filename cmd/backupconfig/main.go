@@ -65,6 +65,17 @@ type Config struct {
 	// on/off flag. Production sets a slow value (30m–1h) via overlay, alongside
 	// the AZURE_* creds mount.
 	ObserveInterval time.Duration `envconfig:"BACKUP_OBSERVE_INTERVAL" default:"0s"`
+	
+	// S3SyncNamespace is where the controller writes the S3 Sync CronJob.
+	S3SyncNamespace string `envconfig:"S3SYNC_NAMESPACE" default:"default"`
+
+	// S3SyncRcloneImage is the container image that runs rclone sync.
+	S3SyncRcloneImage string `envconfig:"S3SYNC_RCLONE_IMAGE" default:"armadaeksatest.azurecr.io/rclone:1.68.2"`
+
+	// S3SyncCredSecret is the K8s Secret name (in S3SyncNamespace) holding
+	// S3 credentials. Data keys required: source-access-key, source-secret-key,
+	// dest-access-key, dest-secret-key.
+	S3SyncCredSecret            string `envconfig:"S3SYNC_CRED_SECRET" default:"s3-creds"`
 
 	// EtcdSnapshotStaleAfter is the staleness threshold for the BackupsFresh
 	// condition — when the NEWEST snapshot is older than this, the condition
