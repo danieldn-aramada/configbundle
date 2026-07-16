@@ -3,6 +3,7 @@ package backupconfig
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -31,9 +32,23 @@ func veleroScheduleName(bc *armadav1.BackupConfig) string {
 	return bc.Name + "-velero"
 }
 
-// reconcileVelero applies the desired Velero Schedule spec from bc.Spec.Velero.
-// Returns a human-readable summary of the PATCH (empty string = no PATCH needed)
-// or an error if the apply failed.
+// bslNameFromLocation derives the Velero BackupStorageLocation name from an
+// Orbital location URL. Convention: the last path segment is the BSL name
+// (e.g. "s3://test-cluster-bucket/velero" -> "velero"; works the same for
+// https://<account>.blob.core.windows.net/... URLs — scheme-agnostic).
+func bslNameFromLocation(location string) string {
+	trimmed := strings.TrimRight(location, "/")
+	idx := strings.LastIndex(trimmed, "/")
+	if idx == -1 {
+		return trimmed
+	}
+	return trimmed[idx+1:]
+}
+
+// reconcileVelero applies the desired Velero Schedule spec from bc.Spec.Velero,
+// and, when a location is set, ensures the referenced BackupStorageLocation
+// exists first (create-and-own — see reconcileBSL). Returns a human-readable
+// summary of all PATCHes (empty string = no PATCH needed) or an error.
 //
 // "Enabled = false" maps to spec.paused = true on the Schedule (Velero's native
 // pause/resume toggle). The schedule resource keeps existing — we don't delete
@@ -42,6 +57,23 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 	logger := log.FromContext(ctx).WithName("backupconfig.velero")
 	block := bc.Spec.Velero
 	name := veleroScheduleName(bc)
+
+	patchMessages := []string{}
+
+	if block.Location != nil {
+		bslName := bslNameFromLocation(*block.Location)
+		desc, err := deriveStorage(*block.Location)
+		if err != nil {
+			return "", fmt.Errorf("derive storage descriptor: %w", err)
+		}
+		bslMsg, err := r.reconcileBSL(ctx, bc, bslName, desc)
+		if err != nil {
+			return "", fmt.Errorf("reconcile BSL: %w", err)
+		}
+		if bslMsg != "" {
+			patchMessages = append(patchMessages, bslMsg)
+		}
+	}
 
 	desired := &unstructured.Unstructured{}
 	desired.SetGroupVersionKind(veleroScheduleGVK)
@@ -59,7 +91,7 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 	}
 	if block.Location != nil {
 		specMap["template"] = map[string]any{
-			"storageLocation": *block.Location,
+			"storageLocation": bslNameFromLocation(*block.Location),
 		}
 	}
 	if err := unstructured.SetNestedMap(desired.Object, specMap, "spec"); err != nil {
@@ -94,11 +126,15 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 		return "", fmt.Errorf("ssa patch velero schedule %s/%s: %w", r.VeleroNamespace, name, err)
 	}
 
-	if len(deltas) == 0 {
+	if len(deltas) > 0 {
+		patchMessages = append(patchMessages, formatBlockDeltas(fmt.Sprintf("velero/%s", name), deltas))
+	}
+
+	if len(patchMessages) == 0 {
 		logger.V(1).Info("velero schedule already matches intent (metadata reconciled)", "name", name)
 		return "", nil
 	}
-	return formatBlockDeltas(fmt.Sprintf("velero/%s", name), deltas), nil
+	return strings.Join(patchMessages, "; "), nil
 }
 
 // observeVelero reads the live Velero Schedule and projects the fields
@@ -154,7 +190,7 @@ func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, 
 			out["schedule"] = *block.Schedule
 		}
 		if block.Location != nil {
-			out["storageLocation"] = *block.Location
+			out["storageLocation"] = bslNameFromLocation(*block.Location)
 		}
 		if block.Enabled != nil {
 			out["paused"] = fmt.Sprintf("%t", !*block.Enabled)
@@ -172,8 +208,9 @@ func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, 
 	}
 	if block.Location != nil {
 		liveLocation, _, _ := unstructured.NestedString(live.Object, "spec", "template", "storageLocation")
-		if liveLocation != *block.Location {
-			out["storageLocation"] = *block.Location
+		desired := bslNameFromLocation(*block.Location)
+		if liveLocation != desired {
+			out["storageLocation"] = desired
 		}
 	}
 	if block.Enabled != nil {
