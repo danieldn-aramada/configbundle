@@ -27,7 +27,29 @@ const s3SyncContainerName = "s3-syncer"
 // from the parsed spec.s3Sync.sourceLocation / destLocation URLs; credentials
 // come from the s3-creds K8s Secret. path_style=true is required for
 // Rook-Ceph and most S3-compatible non-AWS endpoints.
+// s3SyncScript writes a named-remote rclone config at runtime and syncs.
+// Inline connection strings are not used because ':' in http(s):// endpoints
+// is parsed as a delimiter by rclone, truncating the endpoint to just the
+// scheme word ("http") and producing "Custom endpoint 'http' was not a valid URI".
 const s3SyncScript = `set -ex
+cat > /tmp/rclone.conf << EOF
+[source]
+type = s3
+provider = Ceph
+endpoint = ${SOURCE_ENDPOINT}
+access_key_id = ${SOURCE_ACCESS_KEY}
+secret_access_key = ${SOURCE_SECRET_KEY}
+no_check_bucket = true
+
+[dest]
+type = s3
+provider = Other
+endpoint = ${DEST_ENDPOINT}
+access_key_id = ${DEST_ACCESS_KEY}
+secret_access_key = ${DEST_SECRET_KEY}
+no_check_bucket = true
+EOF
+
 if [ -n "${SOURCE_PREFIX}" ]; then
   SOURCE_PATH="${SOURCE_BUCKET}/${SOURCE_PREFIX}"
 else
@@ -38,9 +60,7 @@ if [ -n "${DEST_PREFIX}" ]; then
 else
   DEST_PATH="${DEST_BUCKET}"
 fi
-rclone sync \
-  ":s3,access_key_id=${SOURCE_ACCESS_KEY},secret_access_key=${SOURCE_SECRET_KEY},endpoint=${SOURCE_ENDPOINT},path_style=true:${SOURCE_PATH}" \
-  ":s3,access_key_id=${DEST_ACCESS_KEY},secret_access_key=${DEST_SECRET_KEY},endpoint=${DEST_ENDPOINT},path_style=true:${DEST_PATH}"
+rclone --config /tmp/rclone.conf -v sync "source:${SOURCE_PATH}" "dest:${DEST_PATH}"
 `
 
 // s3SyncCronJobName builds the deterministic CronJob name for a BackupConfig.

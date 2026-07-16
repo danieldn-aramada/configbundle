@@ -106,6 +106,11 @@ spec:
                   controller does not manage S3-sync for this cluster. Actuation not
                   implemented yet — bc-controller logs the spec and moves on.
                 properties:
+                  destLocation:
+                    description: |-
+                      DestLocation is the S3-compatible URL to sync to
+                      (e.g. "https://dest-endpoint/bucket/prefix").
+                    type: string
                   enabled:
                     description: Enabled toggles the S3-sync mechanism on or off.
                     type: boolean
@@ -114,19 +119,14 @@ spec:
                       OrbID is the immutable Orbital identifier for this S3Sync node
                       (e.g. "colo:cluster-001-s3sync"). Set by the bundler; identity-only.
                     type: string
-                  destLocation:
-                    description: |-
-                      DestLocation is the S3-compatible URL to sync to
-                      (e.g. "https://dest-endpoint/bucket/prefix").
+                  schedule:
+                    description: Schedule is a cron expression for when the sync runs
+                      (e.g. "0 4 * * *").
                     type: string
                   sourceLocation:
                     description: |-
                       SourceLocation is the S3-compatible URL to sync from
                       (e.g. "http://rook-ceph-rgw.rook-ceph.svc:80/bucket/prefix").
-                    type: string
-                  schedule:
-                    description: Schedule is a cron expression for when the sync runs
-                      (e.g. "0 4 * * *").
                     type: string
                 required:
                 - orbId
@@ -290,11 +290,11 @@ spec:
                   S3Sync holds observed S3-sync state. Nil = not managed (always today —
                   S3Sync actuation is not implemented; ConditionS3SyncSupported surfaces that).
                 properties:
+                  destLocation:
+                    type: string
                   enabled:
                     type: boolean
                   schedule:
-                    type: boolean
-                  destLocation:
                     type: string
                   sourceLocation:
                     type: string

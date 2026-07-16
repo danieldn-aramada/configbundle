@@ -152,6 +152,11 @@ spec:
                         s3Sync:
                           description: S3Sync holds desired S3-sync backup configuration.
                           properties:
+                            destLocation:
+                              description: |-
+                                DestLocation is the S3-compatible URL to sync to
+                                (e.g. "https://dest-endpoint/bucket/prefix").
+                              type: string
                             enabled:
                               description: Enabled toggles the S3-sync mechanism on
                                 or off.
@@ -164,11 +169,6 @@ spec:
                             schedule:
                               description: Schedule is a cron expression for when
                                 the sync runs (e.g. "0 4 * * *").
-                              type: string
-                            destLocation:
-                              description: |-
-                                DestLocation is the S3-compatible URL to sync to
-                                (e.g. "https://dest-endpoint/bucket/prefix").
                               type: string
                             sourceLocation:
                               description: |-

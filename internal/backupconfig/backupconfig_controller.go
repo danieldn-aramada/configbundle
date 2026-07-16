@@ -104,7 +104,6 @@ type BackupConfigReconciler struct {
 	// dest-access-key, dest-secret-key.
 	S3SyncCredSecret string
 
-
 	// Recorder emits per-action Kubernetes Events (Velero Schedule PATCHed,
 	// etcd CronJob PATCHed, PATCH failed, etc.) so operators can see action
 	// history via `kubectl describe backupconfig <name>` alongside the
@@ -236,7 +235,7 @@ func (r *BackupConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		if err != nil {
 			logger.Error(err, "reconcile S3Sync CronJob", "name", bc.Name)
 			r.setStatusFailed(ctx, &bc, "S3SyncPatchFailed", err.Error())
-			recordReconcileError(bc.Name, "S3SyncPatchFailed")
+			recordReconcileError(bc.Name, bc.Spec.OrbID, "S3SyncPatchFailed")
 			return reconcile.Result{}, fmt.Errorf("reconcile s3sync: %w", err)
 		}
 		if msg != "" {
@@ -417,7 +416,7 @@ func (r *BackupConfigReconciler) readLiveObserved(ctx context.Context, bc *armad
 		}
 		out.Etcd = e
 	}
-	
+
 	if bc.Spec.S3Sync != nil {
 		s, err := observeS3Sync(ctx, r.Client, r.S3SyncNamespace, s3SyncCronJobName(bc))
 		if err != nil {
@@ -600,13 +599,7 @@ func (r *BackupConfigReconciler) writeStatus(ctx context.Context, bc *armadav1.B
 // now implemented so the condition is no longer written; this cleanup ensures
 // CRs that were updated while the stub was live do not keep the False condition.
 func syncS3SyncCondition(bc *armadav1.BackupConfig) {
-	if bc.Spec.S3Sync != nil {
-		setCondition(&bc.Status.Conditions, ConditionS3SyncSupported,
-			metav1.ConditionFalse, "NotImplemented",
-			"spec.s3Sync present; S3Sync actuation not yet implemented")
-		return
-	}
-	removeCondition(&bc.Status.Conditions, ConditionS3SyncSupported)
+	meta.RemoveStatusCondition(&bc.Status.Conditions, ConditionS3SyncSupported)
 }
 
 // markReconcileSuccess bumps status.observedGeneration and status.lastAppliedAt

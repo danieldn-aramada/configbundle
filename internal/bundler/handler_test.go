@@ -264,7 +264,6 @@ func TestMapClusterBackup_S3SyncFieldsPopulated(t *testing.T) {
 	}
 }
 
-
 // derefString returns *p or "" if nil.
 func derefString(p *string) string {
 	if p == nil {
