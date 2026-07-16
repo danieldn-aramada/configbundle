@@ -61,6 +61,13 @@ type Config struct {
 	// for local dev) = event-driven only, no periodic poll. Production deploys
 	// opt in via the K8s manifest — typical band is 1-5min.
 	ObserveInterval time.Duration `envconfig:"BACKUP_OBSERVE_INTERVAL" default:"0s"`
+
+	VeleroS3URL                 string `envconfig:"VELERO_S3_URL" required:"true"`
+	VeleroS3Region              string `envconfig:"VELERO_S3_REGION" default:"default"`
+	VeleroS3ForcePathStyle      bool   `envconfig:"VELERO_S3_FORCE_PATH_STYLE" default:"true"`
+	VeleroAzureResourceGroup    string `envconfig:"VELERO_AZURE_RESOURCE_GROUP"`
+	VeleroAzureSubscriptionID   string `envconfig:"VELERO_AZURE_SUBSCRIPTION_ID"`
+	VeleroAzureCredentialSecret string `envconfig:"VELERO_AZURE_CRED_SECRET" default:"cloud-credentials-azure"`
 }
 
 var (
@@ -135,7 +142,13 @@ func main() {
 		"etcd", cfg.EtcdBackupNamespace,
 		"etcdctlImage", cfg.EtcdctlImage,
 		"uploadImage", cfg.UploadImage,
-		"credentialSecret", cfg.CredentialSecret)
+		"credentialSecret", cfg.CredentialSecret,
+		"veleroS3URL", cfg.VeleroS3URL,
+		"veleroS3Region", cfg.VeleroS3Region,
+		"veleroS3ForcePathStyle", cfg.VeleroS3ForcePathStyle,
+		"veleroAzureResourceGroup", cfg.VeleroAzureResourceGroup,
+		"veleroAzureSubscriptionID", cfg.VeleroAzureSubscriptionID,
+		"veleroAzureCredentialSecret", cfg.VeleroAzureCredentialSecret)
 
 	if cfg.ObserveInterval > 0 {
 		setupLog.Info("drift-detection polling enabled", "interval", cfg.ObserveInterval)
@@ -144,14 +157,20 @@ func main() {
 	}
 
 	if err := (&backupconfig.BackupConfigReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		VeleroNamespace:     cfg.VeleroNamespace,
-		EtcdBackupNamespace: cfg.EtcdBackupNamespace,
-		EtcdctlImage:        cfg.EtcdctlImage,
-		UploadImage:         cfg.UploadImage,
-		CredentialSecret:    cfg.CredentialSecret,
-		ObserveInterval:     cfg.ObserveInterval,
+		Client:                      mgr.GetClient(),
+		Scheme:                      mgr.GetScheme(),
+		VeleroNamespace:             cfg.VeleroNamespace,
+		EtcdBackupNamespace:         cfg.EtcdBackupNamespace,
+		EtcdctlImage:                cfg.EtcdctlImage,
+		UploadImage:                 cfg.UploadImage,
+		CredentialSecret:            cfg.CredentialSecret,
+		ObserveInterval:             cfg.ObserveInterval,
+		VeleroS3URL:                 cfg.VeleroS3URL,
+		VeleroS3Region:              cfg.VeleroS3Region,
+		VeleroS3ForcePathStyle:      cfg.VeleroS3ForcePathStyle,
+		VeleroAzureResourceGroup:    cfg.VeleroAzureResourceGroup,
+		VeleroAzureSubscriptionID:   cfg.VeleroAzureSubscriptionID,
+		VeleroAzureCredentialSecret: cfg.VeleroAzureCredentialSecret,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "backupconfig")
 		os.Exit(1)
