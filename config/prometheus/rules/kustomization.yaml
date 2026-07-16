@@ -1,0 +1,7 @@
+# PrometheusRule for the configbundle domain controllers. Lands in
+# configbundle-system alongside the ServiceMonitors; the Prometheus operator
+# discovers it cluster-wide via the `release: kube-prometheus-stack` label.
+namespace: configbundle-system
+
+resources:
+- prometheus-rule.yaml

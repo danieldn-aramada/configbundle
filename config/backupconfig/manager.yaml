@@ -68,10 +68,20 @@ spec:
             configMapKeyRef:
               name: backupconfig-controller-config
               key: etcdBackupImage
-        # Drift-detection polling: re-reads live state every interval. Empty/unset =
-        # disabled (event-driven only). K8s deploy enables it explicitly.
+        # Observe switch + cadence — ONE knob (mirrors serverconfig's
+        # IDRAC_OBSERVE_INTERVAL; there is no separate on/off flag). Set it (>0)
+        # to turn etcd artifact-observation ON: bc polls the backup store (Azure
+        # Blob) at this cadence and reports snapshot freshness (BackupsFresh
+        # condition + configbundle_backupconfig_status_etcd_* metrics; see
+        # docs/reference/BACKUP.md). "0s" = OFF: bc stays purely watch-driven —
+        # CronJob/Schedule config drift is still caught instantly by the Owns
+        # watches — it just never touches Azure.
+        #
+        # Base leaves it OFF: the shared base carries no Azure creds. Turn it on
+        # per environment via an overlay that also mounts the AZURE_* creds — see
+        # config/overlays/dev-main (deploy: kubectl apply -k config/overlays/dev-main).
         - name: BACKUP_OBSERVE_INTERVAL
-          value: "5m"
+          value: "0s"
         ports:
         - containerPort: 8094
           name: health

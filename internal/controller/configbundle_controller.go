@@ -18,10 +18,12 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -150,10 +152,7 @@ func (r *ConfigBundleReconciler) applyBackupConfig(ctx context.Context, cb *arma
 		return err
 	}
 
-	return r.Patch(ctx, bc, client.Apply,
-		client.FieldOwner("configbundle-controller"),
-		client.ForceOwnership,
-	)
+	return r.applySpecOnly(ctx, bc)
 }
 
 // orbIDToK8sName converts an Orbital orbId (e.g. "colo:cluster-001") into a
@@ -161,6 +160,36 @@ func (r *ConfigBundleReconciler) applyBackupConfig(ctx context.Context, cb *arma
 // Identity remains in spec.orbId; the name is just a label for kubectl listing.
 func orbIDToK8sName(orbID string) string {
 	return strings.ToLower(strings.ReplaceAll(orbID, ":", "-"))
+}
+
+// specOnlyUnstructured converts a child object to unstructured and strips its
+// status. The parent owns child spec + metadata, NOT status — but a typed child
+// object still serializes a zero-value status struct, so a plain SSA apply sends
+// `status: {...}`. That couples the parent's apply to the child's status schema:
+// when the status reshape removed `status.observed`, an older cb-controller still
+// serialized it and every child apply failed against the new CRD. Stripping
+// status makes the parent immune to any future child status-schema change.
+func specOnlyUnstructured(obj client.Object) (*unstructured.Unstructured, error) {
+	u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return nil, fmt.Errorf("convert child to unstructured: %w", err)
+	}
+	unstructured.RemoveNestedField(u, "status")
+	return &unstructured.Unstructured{Object: u}, nil
+}
+
+// applySpecOnly SSA-applies a child owning only its spec + metadata (never its
+// status — see specOnlyUnstructured), with the configbundle-controller field
+// manager and ForceOwnership.
+func (r *ConfigBundleReconciler) applySpecOnly(ctx context.Context, obj client.Object) error {
+	u, err := specOnlyUnstructured(obj)
+	if err != nil {
+		return err
+	}
+	return r.Patch(ctx, u, client.Apply,
+		client.FieldOwner("configbundle-controller"),
+		client.ForceOwnership,
+	)
 }
 
 // applyServerConfig creates or updates a ServerConfig CR for the given server
@@ -192,10 +221,7 @@ func (r *ConfigBundleReconciler) applyServerConfig(ctx context.Context, cb *arma
 		return err
 	}
 
-	return r.Patch(ctx, sc, client.Apply,
-		client.FieldOwner("configbundle-controller"),
-		client.ForceOwnership,
-	)
+	return r.applySpecOnly(ctx, sc)
 }
 
 // SetupWithManager registers the controller with the manager.

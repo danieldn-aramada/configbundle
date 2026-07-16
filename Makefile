@@ -254,6 +254,48 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+##@ Monitoring (local)
+
+# Replicates the dev-main monitoring stack (kube-prometheus-stack: Prometheus,
+# Alertmanager, Grafana, kube-state-metrics) on minikube so the SAME
+# ServiceMonitors + PrometheusRule can be applied and alerts watched firing —
+# entirely locally. Nothing pages: the bundled Alertmanager has no external
+# receiver, so fired alerts are visible in its UI but dispatched nowhere.
+HELM ?= helm
+MONITORING_NS ?= monitoring
+MONITORING_RELEASE ?= kube-prometheus-stack
+
+.PHONY: monitoring-up
+monitoring-up: ## Install kube-prometheus-stack on minikube + apply our ServiceMonitors & PrometheusRule (local alert rig — pages nobody).
+	@command -v $(HELM) >/dev/null 2>&1 || { echo "helm not found — 'brew install helm' first"; exit 1; }
+	$(HELM) repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+	$(HELM) repo update prometheus-community >/dev/null
+	$(HELM) upgrade --install $(MONITORING_RELEASE) prometheus-community/kube-prometheus-stack \
+		--namespace $(MONITORING_NS) --create-namespace --wait --timeout 10m \
+		--set grafana.adminPassword=admin \
+		--set kubeControllerManager.enabled=false \
+		--set kubeScheduler.enabled=false \
+		--set kubeEtcd.enabled=false \
+		--set kubeProxy.enabled=false
+	@$(KUBECTL) create namespace configbundle-system --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) apply -k config/prometheus/service-monitors
+	$(KUBECTL) apply -k config/prometheus/rules
+	@echo ""
+	@echo "Monitoring stack up in '$(MONITORING_NS)'; our ServiceMonitors + PrometheusRule applied."
+	@echo "Access (each in its own terminal):"
+	@echo "  kubectl -n $(MONITORING_NS) port-forward svc/$(MONITORING_RELEASE)-grafana 3000:80         # Grafana   admin/admin (Explore runs 'up')"
+	@echo "  kubectl -n $(MONITORING_NS) port-forward svc/$(MONITORING_RELEASE)-prometheus 9090:9090    # Prometheus (Status>Targets, Alerts)"
+	@echo "  kubectl -n $(MONITORING_NS) port-forward svc/$(MONITORING_RELEASE)-alertmanager 9093:9093  # Alertmanager (fired alerts land here, dispatched nowhere)"
+	@echo ""
+	@echo "No controllers deployed yet, so *ControllerDown alerts fire after 5m (expected); 'make deploy' clears them."
+
+.PHONY: monitoring-down
+monitoring-down: ## Tear down the local monitoring stack and our monitoring objects.
+	-$(KUBECTL) delete -k config/prometheus/rules --ignore-not-found
+	-$(KUBECTL) delete -k config/prometheus/service-monitors --ignore-not-found
+	-$(HELM) uninstall $(MONITORING_RELEASE) --namespace $(MONITORING_NS)
+	-$(KUBECTL) delete namespace $(MONITORING_NS) --ignore-not-found
+
 ##@ Dependencies
 
 ## Location to install dependencies to

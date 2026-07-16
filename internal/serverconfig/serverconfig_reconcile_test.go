@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -42,6 +43,7 @@ func newSkipTestReconciler(t *testing.T, sc *armadav1.ServerConfig) (*ServerConf
 		AllowedFields:         allFields(),
 		CredentialsNamespace:  "default",
 		CredentialsSecretName: "idrac-credentials",
+		Recorder:              record.NewFakeRecorder(32),
 	}
 	return r, c
 }
@@ -93,7 +95,7 @@ func TestReconcile_SkipsNoOobIP_WritesStatus(t *testing.T) {
 	if got.Status.Phase != armadav1.ServerConfigPhaseSkipped {
 		t.Errorf("Phase = %q, want Skipped", got.Status.Phase)
 	}
-	assertReconciledCondition(t, &got, metav1.ConditionFalse, "NoOobIP", "spec.oobIP is empty")
+	assertReconciledCondition(t, &got, metav1.ConditionUnknown, "NoOobIP", "spec.oobIP is empty")
 }
 
 func TestReconcile_SkipsOobNotAllowlisted_WritesStatus(t *testing.T) {
@@ -124,7 +126,7 @@ func TestReconcile_SkipsOobNotAllowlisted_WritesStatus(t *testing.T) {
 		t.Errorf("Phase = %q, want Skipped", got.Status.Phase)
 	}
 	// Message names the offending IP so operators can grep for it.
-	assertReconciledCondition(t, &got, metav1.ConditionFalse, "NotInOobAllowlist", "10.99.99.99")
+	assertReconciledCondition(t, &got, metav1.ConditionUnknown, "NotInOobAllowlist", "10.99.99.99")
 }
 
 // TestReconcile_SkipStatusClearsOnAllowlistAdmission verifies that once an
@@ -148,7 +150,7 @@ func TestReconcile_SkipStatusClearsOnAllowlistAdmission(t *testing.T) {
 			Phase: armadav1.ServerConfigPhaseSkipped,
 			Conditions: []metav1.Condition{{
 				Type:               ConditionReconciled,
-				Status:             metav1.ConditionFalse,
+				Status:             metav1.ConditionUnknown,
 				Reason:             "NotInOobAllowlist",
 				Message:            "stale — allowlist just changed",
 				LastTransitionTime: metav1.Now(),
@@ -172,5 +174,39 @@ func TestReconcile_SkipStatusClearsOnAllowlistAdmission(t *testing.T) {
 	}
 	if got.Status.Phase == armadav1.ServerConfigPhaseSkipped {
 		t.Errorf("Phase stuck at Skipped after allowlist admission; want progression to Diverged or Applied")
+	}
+}
+
+// TestReconcile_FailureEmitsWarningEvent verifies errors surface to humans as
+// Kubernetes Warning Events (kubectl describe / get events), not just status
+// conditions. Drives the missing-credentials path: in-allowlist server, no
+// credentials Secret → MissingCredentials failure.
+func TestReconcile_FailureEmitsWarningEvent(t *testing.T) {
+	sc := &armadav1.ServerConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "colo-r740-09"},
+		Spec: armadav1.ServerConfigSpec{
+			ServiceTag: "FAIL01",
+			OobIP:      ptr.To("10.20.21.44"), // in allowlist → passes the gate, then creds load fails
+			IdracSettings: armadav1.IdracSettingsSpec{
+				SSHEnabled: ptr.To(true),
+			},
+		},
+	}
+	r, _ := newSkipTestReconciler(t, sc)
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: sc.Name},
+	}); err != nil {
+		t.Fatalf("Reconcile returned unexpected error: %v", err)
+	}
+
+	fr := r.Recorder.(*record.FakeRecorder)
+	select {
+	case ev := <-fr.Events:
+		if !strings.Contains(ev, "Warning") || !strings.Contains(ev, "MissingCredentials") {
+			t.Errorf("expected a Warning MissingCredentials event; got %q", ev)
+		}
+	default:
+		t.Errorf("expected a Warning Event on failure; got none")
 	}
 }

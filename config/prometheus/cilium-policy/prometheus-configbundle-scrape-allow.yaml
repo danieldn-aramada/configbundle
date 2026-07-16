@@ -1,0 +1,41 @@
+# Allow Prometheus (namespace: monitoring, kube-prometheus-stack instance) to
+# scrape configbundle controllers whose /metrics endpoint lives on the NODE IP
+# rather than a pod IP. Specifically, sc-controller (serverconfig-controller)
+# runs `hostNetwork: true` to reach the iDRAC OOB subnet — its metrics port
+# 8443 therefore binds to the node, and the cluster-wide `deny-node-network`
+# CiliumClusterwideNetworkPolicy would otherwise drop scrape connections.
+#
+# This CNP mirrors the shape of the platform-security chart's
+# `monitoring/prometheus-node-scrape-allow`, which whitelists a curated set of
+# node-scope ports (10250 kubelet, 10249 kube-proxy, 10257 kcm, 10259 sched,
+# 2381 etcd, 9100 node-exporter). We add 8443 for configbundle controllers,
+# scoped by the same Prom endpointSelector — no other pod gets this exemption.
+#
+# We intentionally do NOT modify `prometheus-node-scrape-allow` in place — it
+# is Helm/ArgoCD-managed by the galleon-platform-security chart, so in-place
+# edits would drift and get reverted on next sync. A separate CNP is additive
+# under Cilium's policy union semantics.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: prometheus-configbundle-scrape-allow
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/component: configbundle-observability
+spec:
+  description: >-
+    Allow Prometheus in namespace monitoring to scrape configbundle
+    controller /metrics endpoints on node IP:8443 (needed for
+    hostNetwork-enabled controllers like sc-controller).
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/instance: kube-prometheus-stack-prometheus
+      app.kubernetes.io/name: prometheus
+  egress:
+  - toEntities:
+    - host
+    - remote-node
+    toPorts:
+    - ports:
+      - port: "8443"
+        protocol: TCP

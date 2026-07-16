@@ -89,45 +89,27 @@ type ServerConfigStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// ObservedFirmwareVersion is the firmware version read from Redfish at last reconcile.
-	// +optional
-	ObservedFirmwareVersion string `json:"observedFirmwareVersion,omitempty"`
-
-	// Observed holds the controller's per-field confirmed values — values the
-	// controller has successfully landed on the device (PATCH success), or
-	// confirmed already match on a no-op reconcile. Survives multi-step
-	// reconciles where the condition message can only hold the most recent
-	// action. Absence of a field means the controller has never confirmed it.
-	// +optional
-	Observed ObservedStatus `json:"observed,omitempty"`
-
-	// RecentPatches is a bounded list of the last few PATCH actions, newest
-	// first. Lets operators see all PATCHes from a multi-step reconcile (e.g.
-	// a takeover roundtrip that produces multiple sc-controller reconciles)
-	// instead of just the most recent one — the condition `message` field
-	// can only hold one action and gets overwritten across reconciles.
-	// Capped at 5 entries to keep the status object small.
-	// +optional
-	// +listType=atomic
-	RecentPatches []RecentPatch `json:"recentPatches,omitempty"`
-}
-
-// RecentPatch is one entry in ServerConfigStatus.RecentPatches.
-type RecentPatch struct {
-	// Time is when the PATCH succeeded against the iDRAC.
-	Time metav1.Time `json:"time"`
-
-	// Message describes which fields were PATCHed, e.g.
-	// "PATCHed 2 attribute(s): IPMILan.1.Enable=Disabled, SSH.1.Enable=Disabled".
-	// Same format as the Reconciled condition's message.
-	Message string `json:"message"`
-}
-
-// ObservedStatus contains per-domain observed-state ledgers.
-type ObservedStatus struct {
-	// IdracSettings holds the controller-confirmed iDRAC field values.
+	// IdracSettings holds the controller's observed iDRAC state — values read
+	// live off the device (via Redfish) at the last reconcile. Mirrors
+	// spec.idracSettings: desired ↔ observed at matching paths, and the
+	// spec/status prefix is itself the label (no `observed:` wrapper — see
+	// docs/reference/DOMAIN-CONTROLLER.md §1). Absence of a field means the
+	// controller has never confirmed it. A superset of the managed spec subset:
+	// it may also carry observation-only fields with no desired counterpart.
 	// +optional
 	IdracSettings ObservedIdracSettingsStatus `json:"idracSettings,omitempty"`
+
+	// LastAppliedAt is the wall-clock time of the most recent successful
+	// reconcile action (PATCH landed, or no-op confirmed already-converged).
+	// Bumps on every reconcile that reaches the actuation step.
+	// Distinct from Conditions[Reconciled].LastTransitionTime, which per K8s
+	// convention only moves when Status flips — so that field lies for the
+	// "still Reconciled=True, another PATCH landed just now" case.
+	// LastAppliedAt is the truthful "is the controller still doing work?" signal.
+	// Per-action history goes to Kubernetes Events; this field is just a
+	// timestamp, no message. Nil = no successful reconcile yet.
+	// +optional
+	LastAppliedAt *metav1.Time `json:"lastAppliedAt,omitempty"`
 }
 
 // ObservedIdracSettingsStatus mirrors the controller-managed subset of
@@ -140,6 +122,11 @@ type ObservedIdracSettingsStatus struct {
 	IPMIEnabled *bool `json:"ipmiEnabled,omitempty"`
 	// +optional
 	RacadmEnabled *bool `json:"racadmEnabled,omitempty"`
+	// FirmwareVersion is the observed iDRAC firmware read from Redfish, mirroring
+	// spec.idracSettings.firmwareVersion. Nil until a firmware read lands (not yet
+	// implemented) — observation-only for now.
+	// +optional
+	FirmwareVersion *string `json:"firmwareVersion,omitempty"`
 }
 
 // +kubebuilder:object:root=true

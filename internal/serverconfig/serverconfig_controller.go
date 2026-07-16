@@ -7,11 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -184,6 +185,14 @@ type ServerConfigReconciler struct {
 	// stay invisible until the next spec change. Zero = no periodic poll
 	// (event-driven only).
 	ObserveInterval time.Duration
+
+	// Recorder emits per-action Kubernetes Events (PATCH landed, PATCH failed,
+	// etc.) so operators can see the action history via `kubectl describe sc
+	// <name>` alongside the K8s-native Events section. Replaces the bounded
+	// status.recentPatches[] we used to maintain — Events are the K8s norm
+	// for "what happened when," complete with TTL, dedup (count/lastTimestamp),
+	// and cross-resource correlation via involvedObject.
+	Recorder record.EventRecorder
 }
 
 func (r *ServerConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -204,7 +213,11 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	var sc armadav1.ServerConfig
 	if err := r.Get(ctx, req.NamespacedName, &sc); err != nil {
 		if apierrors.IsNotFound(err) {
-			logger.Info("serverconfig deleted", "name", req.Name, "namespace", req.Namespace)
+			logger.Info("serverconfig deleted")
+			// Drop the deleted server from the ssh_enabled and reconcile-success
+			// gauges so it stops appearing.
+			removeSSHEnabled(req.Name)
+			removeReconcileSuccess(req.Name)
 			return reconcile.Result{}, nil
 		}
 		return reconcile.Result{}, err
@@ -213,8 +226,8 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	// No oobIP means nothing actionable — surface the skip on status so
 	// `kubectl describe sc <name>` explains the blank live state.
 	if sc.Spec.OobIP == nil || *sc.Spec.OobIP == "" {
-		logger.Info("no oobIP on serverconfig; skipping",
-			"name", sc.Name, "serviceTag", sc.Spec.ServiceTag)
+		logger.V(1).Info("no oobIP on serverconfig; skipping",
+			"serviceTag", sc.Spec.ServiceTag)
 		r.setStatusSkipped(ctx, &sc, "NoOobIP",
 			"spec.oobIP is empty — no target to reconcile against. Populate spec.oobIP to enable reconciliation.")
 		return reconcile.Result{}, nil
@@ -226,8 +239,8 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	// "controller broken" from "this CR is deliberately not managed by this
 	// controller instance" without reading logs.
 	if !r.AllowedOobIPs[oobIP] {
-		logger.Info("change detected but oobIP not on allowlist, ignoring",
-			"name", sc.Name, "oobIP", oobIP,
+		logger.V(1).Info("change detected but oobIP not on allowlist, ignoring",
+			"oobIP", oobIP,
 			"intent.sshEnabled", boolPtr(sc.Spec.IdracSettings.SSHEnabled),
 			"intent.racadmEnabled", boolPtr(sc.Spec.IdracSettings.RacadmEnabled),
 			"intent.ipmiEnabled", boolPtr(sc.Spec.IdracSettings.IPMIEnabled))
@@ -236,28 +249,19 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		return reconcile.Result{}, nil
 	}
 
-	// Look up the parent ConfigBundle so we can mirror its spec.ignored[]
-	// entries into the ignored gauge. Best-effort: if the parent isn't
-	// reachable (transient cache miss, RBAC tightening), we still emit
-	// intent + observed gauges — the ignored gauge just stays absent for
-	// this server until the next reconcile.
-	ignoredFields := ignoredFieldsForServer(ctx, r.Client, &sc, logger)
-	recordIgnored(sc.Name, oobIP, ignoredFields, r.AllowedFields)
-
 	// Nothing reconcilable on this CR — either no intent set, or all intent
-	// fields are blocked by the field allowlist. Surface both states.
+	// fields are blocked by the field allowlist. Surface it as a deliberate
+	// skip (Phase=Skipped, Reconciled=Unknown), consistent with the other skip
+	// gates above — a benign "nothing to enforce," not a fault.
 	if !hasReconcilableIntent(sc.Spec.IdracSettings, r.AllowedFields) {
-		logger.Info("no reconcilable intent on serverconfig; skipping",
-			"name", sc.Name, "oobIP", oobIP,
+		logger.V(1).Info("no reconcilable intent on serverconfig; skipping",
+			"oobIP", oobIP,
 			"unmanaged", unmanagedFields(sc.Spec.IdracSettings),
 			"policyBlocked", policyBlockedFields(sc.Spec.IdracSettings, r.AllowedFields))
-		recordIntent(sc.Name, oobIP, sc.Spec.IdracSettings, r.AllowedFields)
+		r.setStatusSkipped(ctx, &sc, "NoManagedFields",
+			"no allowlisted iDRAC field has intent set — nothing to reconcile")
 		return reconcile.Result{}, nil
 	}
-
-	// Refresh the intent gauge before the network step so it stays in sync
-	// with the CR even if the Redfish GET fails.
-	recordIntent(sc.Name, oobIP, sc.Spec.IdracSettings, r.AllowedFields)
 
 	// Load shared credentials.
 	creds, err := loadIdracCredentials(ctx, r.Client, r.CredentialsNamespace, r.CredentialsSecretName)
@@ -268,15 +272,14 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		// Long requeue lets us recover automatically without the noise.
 		if apierrors.IsNotFound(err) {
 			logger.Info("iDRAC credentials Secret not found; deferring reconcile (create the Secret to proceed)",
-				"name", sc.Name,
 				"secret", r.CredentialsNamespace+"/"+r.CredentialsSecretName)
 			r.setStatusFailed(ctx, &sc, "MissingCredentials", err.Error())
-			recordReconcileError(sc.Name, "MissingCredentials")
+			recordReconcileError(sc.Name, oobIP, sc.Spec.OrbID, "MissingCredentials")
 			return reconcile.Result{RequeueAfter: 1 * time.Minute}, nil
 		}
 		logger.Error(err, "load iDRAC credentials")
 		r.setStatusFailed(ctx, &sc, "CredentialsLoadFailed", err.Error())
-		recordReconcileError(sc.Name, "CredentialsLoadFailed")
+		recordReconcileError(sc.Name, oobIP, sc.Spec.OrbID, "CredentialsLoadFailed")
 		return reconcile.Result{}, fmt.Errorf("load credentials: %w", err)
 	}
 
@@ -286,107 +289,69 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	if err != nil {
 		logger.Error(err, "read iDRAC Attributes", "oobIP", oobIP)
 		r.setStatusFailed(ctx, &sc, "RedfishReadFailed", err.Error())
-		recordReconcileError(sc.Name, "RedfishReadFailed")
+		recordReconcileError(sc.Name, oobIP, sc.Spec.OrbID, "RedfishReadFailed")
 		return reconcile.Result{}, fmt.Errorf("read Attributes from %s: %w", oobIP, err)
 	}
 
-	recordObserved(sc.Name, oobIP, attrs, r.AllowedFields)
+	// Promote the observed SSH-enabled state to a metric
+	// (configbundle_serverconfig_ssh_enabled) — SSH is a security-relevant toggle
+	// worth alerting on; the rest of idracSettings stays on .status. Read straight
+	// from the live Redfish attributes, sourced here (not from the CR status
+	// write) so a status-write conflict can never blank the metric. Report what
+	// this poll actually read off the device, raw, before any drift correction
+	// below. If SSH can't be read, drop the series (absent = unknown, never a
+	// false 0).
+	if raw, ok := attrs[attrSSHEnable].(string); ok {
+		recordSSHEnabled(sc.Name, oobIP, sc.Spec.OrbID, enableStrToBool(raw))
+	} else {
+		removeSSHEnabled(sc.Name)
+	}
+	r.recordObserved(ctx, &sc, attrs)
 
 	deltas := computeIdracDeltas(sc.Spec.IdracSettings, attrs, r.AllowedFields)
 	unmanaged := unmanagedFields(sc.Spec.IdracSettings)
 	blocked := policyBlockedFields(sc.Spec.IdracSettings, r.AllowedFields)
 
 	if len(deltas) == 0 {
-		logger.Info("reconciled (no PATCH needed)",
-			"name", sc.Name, "oobIP", oobIP,
+		logger.V(1).Info("reconciled (no PATCH needed)",
+			"oobIP", oobIP,
 			"unmanaged", unmanaged,
 			"policyBlocked", blocked)
-		// Don't overwrite a prior "PATCHed N attribute(s)" status message on
-		// every periodic poll — that erases the useful action history. Status
-		// is for "what the controller last did," not "what we just observed";
-		// live values flow to Prometheus gauges instead. Only refresh status
-		// here if we're recovering from a non-Reconciled state.
-		if !isCurrentlyReconciled(&sc) {
-			r.setStatusApplied(ctx, &sc, "all managed settings already match intent")
+		// Steady-state: keep the Reconciled=True condition's LastTransitionTime
+		// stable (K8s norm — LTT only moves on Status flip). bump ObservedGeneration
+		// and LastAppliedAt so tooling sees "controller is caught up and still
+		// working." First-time convergence path (isCurrentlyReconciled=false)
+		// flips the condition via setStatusApplied.
+		if !meta.IsStatusConditionTrue(sc.Status.Conditions, ConditionReconciled) {
+			r.setStatusApplied(ctx, &sc)
 		} else {
-			// Still bump observedGeneration so tooling can detect we've seen
-			// the latest spec. Cheap — skipped entirely when already caught up.
-			r.bumpObservedGeneration(ctx, &sc)
+			r.markReconcileSuccess(ctx, &sc)
 		}
-		// Populate the per-field observed ledger: iDRAC confirmed-matches-intent
-		// for every allowlisted managed field. Skipped if already correct.
-		r.recordObserved(ctx, &sc, attrs)
-		recordReconcileSuccess(sc.Name, time.Now().Unix())
+		recordReconcileSuccess(sc.Name, oobIP, sc.Spec.OrbID, time.Now().Unix())
 		return reconcile.Result{RequeueAfter: r.ObserveInterval}, nil
 	}
 
 	if err := rc.PatchAttributes(ctx, deltas); err != nil {
 		logger.Error(err, "PATCH iDRAC attributes", "oobIP", oobIP, "updates", deltas)
 		r.setStatusFailed(ctx, &sc, "RedfishPatchFailed", err.Error())
-		recordReconcileError(sc.Name, "RedfishPatchFailed")
+		recordReconcileError(sc.Name, oobIP, sc.Spec.OrbID, "RedfishPatchFailed")
 		return reconcile.Result{}, fmt.Errorf("PATCH attributes on %s: %w", oobIP, err)
 	}
 	logger.Info("reconciled (PATCH applied)",
-		"name", sc.Name, "oobIP", oobIP,
+		"oobIP", oobIP,
 		"unmanaged", unmanaged,
 		"policyBlocked", blocked,
 		"updates", deltas)
+	// Emit a Kubernetes Event with the specific PATCH detail — the K8s-native
+	// "action history" surface (see `kubectl describe sc <name>` Events). The
+	// observed metric and .status were already recorded above from the raw
+	// poll; the corrected value surfaces on the next poll, so observed stays an
+	// honest "what we saw" snapshot rather than "what we just asserted."
 	patchMsg := fmt.Sprintf("PATCHed %d attribute(s): %s", len(deltas), formatDeltas(deltas))
-	r.setStatusApplied(ctx, &sc, patchMsg)
-	// Overlay the just-PATCHed values into the attrs snapshot so observed
-	// reflects post-PATCH state without a second Redfish GET. Delta keys +
-	// values are Dell Attribute-API strings — same shape as attrs — so this
-	// is a simple map merge. Fields not in deltas retain their pre-PATCH
-	// live value.
-	for k, v := range deltas {
-		attrs[k] = v
-	}
-	r.recordObserved(ctx, &sc, attrs)
-	// Append to the bounded action-history list so operators can see all
-	// PATCHes from a multi-step reconcile (the condition message only holds
-	// the latest).
-	r.appendRecentPatch(ctx, &sc, patchMsg)
-	recordReconcileSuccess(sc.Name, time.Now().Unix())
+	r.Recorder.Eventf(&sc, corev1.EventTypeNormal, "Applied", patchMsg)
+	r.setStatusApplied(ctx, &sc)
+	recordReconcileSuccess(sc.Name, oobIP, sc.Spec.OrbID, time.Now().Unix())
 	return reconcile.Result{RequeueAfter: r.ObserveInterval}, nil
-}
-
-// ignoredFieldsForServer returns the set of allowlisted-field names that the
-// parent ConfigBundle's spec.ignored[] lists for this ServerConfig. Used to
-// label the ignored gauge so alert rules can suppress drift alerts on
-// admin-overridden fields.
-//
-// Best-effort: any failure to resolve the parent (no OwnerReference, CR not
-// found, RBAC denied) returns an empty set + a debug log line. The reconcile
-// itself is not affected — intent and observed gauges still emit. The ignored
-// gauge series is simply absent for this server until the next reconcile
-// resolves the parent.
-func ignoredFieldsForServer(ctx context.Context, c client.Client, sc *armadav1.ServerConfig, logger logr.Logger) map[string]bool {
-	out := map[string]bool{}
-
-	var ownerName string
-	for _, ref := range sc.OwnerReferences {
-		if ref.Kind == "ConfigBundle" {
-			ownerName = ref.Name
-			break
-		}
-	}
-	if ownerName == "" {
-		logger.V(1).Info("serverconfig has no ConfigBundle ownerRef; ignored gauge will be empty", "name", sc.Name)
-		return out
-	}
-
-	var cb armadav1.ConfigBundle
-	if err := c.Get(ctx, types.NamespacedName{Name: ownerName}, &cb); err != nil {
-		logger.V(1).Info("could not load parent ConfigBundle; ignored gauge will be empty", "name", sc.Name, "owner", ownerName, "err", err.Error())
-		return out
-	}
-
-	for _, ig := range cb.Spec.Ignored {
-		if ig.ServerOrbID == sc.Spec.OrbID {
-			out[ig.Field] = true
-		}
-	}
-	return out
 }
 
 // formatDeltas renders a small map as a stable, human-readable string for
@@ -404,34 +369,57 @@ func formatDeltas(d map[string]string) string {
 	return strings.Join(parts, ", ")
 }
 
-// setStatusApplied writes Phase=Applied + Reconciled=True. Best-effort: status
-// conflicts are logged and dropped; the next reconcile will reassert.
-func (r *ServerConfigReconciler) setStatusApplied(ctx context.Context, sc *armadav1.ServerConfig, msg string) {
-	r.writeStatus(ctx, sc, armadav1.ServerConfigPhaseApplied, metav1.ConditionTrue, "SSHApplied", msg)
+// setStatusApplied writes Phase=Applied + Reconciled=True with a stable,
+// generic Reason and Message — the K8s norm is that Condition Message
+// describes STATE ("we're converged"), not the last ACTION. Per-PATCH
+// action detail goes to Kubernetes Events (via r.Recorder), not the
+// Condition. Best-effort: status conflicts are logged and dropped; the
+// next reconcile will reassert.
+func (r *ServerConfigReconciler) setStatusApplied(ctx context.Context, sc *armadav1.ServerConfig) {
+	r.writeStatus(ctx, sc, armadav1.ServerConfigPhaseApplied, metav1.ConditionTrue,
+		"SettingsApplied", "all managed settings match intent", true /* bumpLastApplied */)
 }
 
 // setStatusFailed writes Phase=Diverged + Reconciled=False with a Reason that
 // names which step failed (MissingCredentials, RedfishReadFailed, RedfishPatchFailed).
+// Does NOT bump LastAppliedAt — the reconcile did not succeed.
+//
+// Also emits a Warning Event so failures surface to humans via `kubectl
+// describe sc <name>` and `kubectl get events`, symmetric with the Normal
+// "Applied" events on success. K8s Event aggregation dedups repeats
+// (count/lastTimestamp), so a persistently-failing iDRAC yields one aggregated
+// event, not a flood — safe to emit on every failing reconcile.
 func (r *ServerConfigReconciler) setStatusFailed(ctx context.Context, sc *armadav1.ServerConfig, reason, msg string) {
-	r.writeStatus(ctx, sc, armadav1.ServerConfigPhaseDiverged, metav1.ConditionFalse, reason, msg)
+	r.Recorder.Event(sc, corev1.EventTypeWarning, reason, msg)
+	r.writeStatus(ctx, sc, armadav1.ServerConfigPhaseDiverged, metav1.ConditionFalse, reason, msg, false)
 }
 
-// setStatusSkipped writes Phase=Skipped + Reconciled=False with a Reason
+// setStatusSkipped writes Phase=Skipped + Reconciled=Unknown with a Reason
 // describing why the controller deliberately did not reconcile this CR
-// (NoOobIP, NotInOobAllowlist). Distinct from setStatusFailed — a Skipped
-// CR was never attempted, not tried-and-failed. Surfaces the gate that
-// blocked reconciliation so `kubectl describe sc <name>` explains blank
-// live state without an operator having to check the controller logs.
+// (NoOobIP, NotInOobAllowlist).
+//
+// Unknown, not False, is deliberate: False means "managed, and determined NOT
+// converged" (a real problem worth alerting on). A skipped CR isn't managed by
+// this controller instance, so convergence is simply not being determined —
+// that's the textbook meaning of Unknown. Keeping it out of False means an
+// operator alerting on `Reconciled=False` pages only for genuinely-broken
+// servers, not for ones deliberately out of scope. (Same reasoning K8s uses
+// for NodeReady=Unknown when a node is unreachable.)
+// Does NOT bump LastAppliedAt — no apply happened.
 func (r *ServerConfigReconciler) setStatusSkipped(ctx context.Context, sc *armadav1.ServerConfig, reason, msg string) {
-	r.writeStatus(ctx, sc, armadav1.ServerConfigPhaseSkipped, metav1.ConditionFalse, reason, msg)
+	// Skipped ⇒ not managed here ⇒ the reconcile_success series must be ABSENT
+	// (absent = skip), not 0 (which means "managed and failing"). Drop any prior
+	// series for a server that has left the allowlist.
+	removeReconcileSuccess(sc.Name)
+	r.writeStatus(ctx, sc, armadav1.ServerConfigPhaseSkipped, metav1.ConditionUnknown, reason, msg, false)
 }
 
-// writeStatus updates the ServerConfig's Phase + Reconciled condition.
-// Wrapped in RetryOnConflict so an immediately-prior Get's resourceVersion
-// going stale (e.g. just after `kubectl apply` creates the CR and the cache
-// hasn't fully synced) doesn't surface a benign optimistic-concurrency 409.
-// Refetch + reapply on conflict; bail out on any non-conflict error.
-func (r *ServerConfigReconciler) writeStatus(ctx context.Context, sc *armadav1.ServerConfig, phase armadav1.ServerConfigPhase, condStatus metav1.ConditionStatus, reason, msg string) {
+// writeStatus updates the ServerConfig's Phase + Reconciled condition, and
+// optionally bumps LastAppliedAt (success paths only). Wrapped in
+// RetryOnConflict so an immediately-prior Get's resourceVersion going stale
+// (e.g. just after `kubectl apply` creates the CR and the cache hasn't fully
+// synced) doesn't surface a benign optimistic-concurrency 409.
+func (r *ServerConfigReconciler) writeStatus(ctx context.Context, sc *armadav1.ServerConfig, phase armadav1.ServerConfigPhase, condStatus metav1.ConditionStatus, reason, msg string, bumpLastApplied bool) {
 	logger := log.FromContext(ctx).WithName("serverconfig.status")
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var fresh armadav1.ServerConfig
@@ -440,50 +428,30 @@ func (r *ServerConfigReconciler) writeStatus(ctx context.Context, sc *armadav1.S
 		}
 		fresh.Status.Phase = phase
 		fresh.Status.ObservedGeneration = fresh.Generation
-		setCondition(&fresh.Status.Conditions, ConditionReconciled, condStatus, reason, msg)
+		if bumpLastApplied {
+			now := metav1.Now()
+			fresh.Status.LastAppliedAt = &now
+		}
+		// meta.SetStatusCondition is the apimachinery-canonical upsert: it moves
+		// LastTransitionTime only when Status flips, and always refreshes
+		// Reason/Message/ObservedGeneration — exactly the semantics we want.
+		// Passing ObservedGeneration records which spec generation this
+		// condition reflects (per-condition freshness signal).
+		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
+			Type:               ConditionReconciled,
+			Status:             condStatus,
+			Reason:             reason,
+			Message:            msg,
+			ObservedGeneration: fresh.Generation,
+		})
 		return r.Status().Update(ctx, &fresh)
 	})
 	if err != nil {
-		logger.Info("status update failed (will retry next reconcile)", "name", sc.Name, "err", err.Error())
+		logger.Info("status update failed (will retry next reconcile)", "err", err.Error())
 	}
 }
 
-// recentPatchesLimit caps how many PATCH-history entries we keep in
-// status.recentPatches. Five is enough to see a typical multi-step reconcile
-// (takeover, override-and-revert, drift-correction) in full, while keeping
-// status size negligible — each entry is ~200 bytes.
-const recentPatchesLimit = 5
-
-// appendRecentPatch prepends a new PATCH-action entry to status.recentPatches
-// and truncates the list to recentPatchesLimit. Called only on successful
-// Redfish PATCH (never on no-op reconciles) — the list is an action log, not
-// an observation log. Read-modify-write with RetryOnConflict.
-func (r *ServerConfigReconciler) appendRecentPatch(ctx context.Context, sc *armadav1.ServerConfig, message string) {
-	entry := armadav1.RecentPatch{
-		Time:    metav1.Now(),
-		Message: message,
-	}
-	logger := log.FromContext(ctx).WithName("serverconfig.status")
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var fresh armadav1.ServerConfig
-		if err := r.Get(ctx, client.ObjectKeyFromObject(sc), &fresh); err != nil {
-			return err
-		}
-		recent := make([]armadav1.RecentPatch, 0, recentPatchesLimit+1)
-		recent = append(recent, entry)
-		recent = append(recent, fresh.Status.RecentPatches...)
-		if len(recent) > recentPatchesLimit {
-			recent = recent[:recentPatchesLimit]
-		}
-		fresh.Status.RecentPatches = recent
-		return r.Status().Update(ctx, &fresh)
-	})
-	if err != nil {
-		logger.Info("recentPatches update failed (next PATCH will retry)", "name", sc.Name, "err", err.Error())
-	}
-}
-
-// recordObserved writes status.observed.idracSettings from the live Redfish
+// recordObserved writes status.idracSettings from the live Redfish
 // Attributes map (passed in by the caller from the top-of-reconcile GET).
 // Live-read semantics: observed reflects what actually exists on the iDRAC,
 // not the intent we PATCHed. Consequences:
@@ -501,7 +469,7 @@ func (r *ServerConfigReconciler) appendRecentPatch(ctx context.Context, sc *arma
 // iDRAC round-trips on unrelated status races.
 func (r *ServerConfigReconciler) recordObserved(ctx context.Context, sc *armadav1.ServerConfig, attrs map[string]any) {
 	desired := buildObservedIdrac(attrs, r.AllowedFields)
-	if observedIdracEqual(sc.Status.Observed.IdracSettings, desired) {
+	if observedIdracEqual(sc.Status.IdracSettings, desired) {
 		return
 	}
 	logger := log.FromContext(ctx).WithName("serverconfig.status")
@@ -510,14 +478,14 @@ func (r *ServerConfigReconciler) recordObserved(ctx context.Context, sc *armadav
 		if err := r.Get(ctx, client.ObjectKeyFromObject(sc), &fresh); err != nil {
 			return err
 		}
-		if observedIdracEqual(fresh.Status.Observed.IdracSettings, desired) {
+		if observedIdracEqual(fresh.Status.IdracSettings, desired) {
 			return nil
 		}
-		fresh.Status.Observed.IdracSettings = desired
+		fresh.Status.IdracSettings = desired
 		return r.Status().Update(ctx, &fresh)
 	})
 	if err != nil {
-		logger.Info("observed status update failed (will retry next reconcile)", "name", sc.Name, "err", err.Error())
+		logger.Info("observed status update failed (will retry next reconcile)", "err", err.Error())
 	}
 }
 
@@ -562,13 +530,26 @@ func boolPtrEqual(a, b *bool) bool {
 	return *a == *b
 }
 
-// bumpObservedGeneration writes status.observedGeneration = metadata.generation
-// if they differ. Called on no-op reconciles (where we skip the full writeStatus
-// to preserve the prior action message) so tooling can still observe "controller
-// has caught up to my spec change." The "only write on change" guard means
-// periodic polls in steady state produce zero apiserver writes.
-func (r *ServerConfigReconciler) bumpObservedGeneration(ctx context.Context, sc *armadav1.ServerConfig) {
-	if sc.Status.ObservedGeneration == sc.Generation {
+// markReconcileSuccess bumps status.observedGeneration and status.lastAppliedAt
+// on steady-state successful reconciles (Reconciled=True stays True). The
+// Reconciled condition is deliberately NOT rewritten here — K8s norm is that
+// Condition.LastTransitionTime only moves on Status flip. LastAppliedAt is
+// the truthful "controller is still doing work" signal; ObservedGeneration is
+// the "controller has caught up to this spec.generation" signal. Skipped
+// entirely when both markers already match, so periodic polls in steady state
+// produce zero apiserver writes.
+func (r *ServerConfigReconciler) markReconcileSuccess(ctx context.Context, sc *armadav1.ServerConfig) {
+	needBump := sc.Status.ObservedGeneration != sc.Generation || sc.Status.LastAppliedAt == nil
+	if !needBump {
+		// Rate-limit LastAppliedAt writes to roughly once per ObserveInterval —
+		// otherwise every 5-min drift poll would touch status even when nothing
+		// meaningful changed. If the previous LastAppliedAt is older than half
+		// the observe interval, bump it; otherwise skip.
+		if r.ObserveInterval > 0 && time.Since(sc.Status.LastAppliedAt.Time) > r.ObserveInterval/2 {
+			needBump = true
+		}
+	}
+	if !needBump {
 		return
 	}
 	logger := log.FromContext(ctx).WithName("serverconfig.status")
@@ -577,54 +558,24 @@ func (r *ServerConfigReconciler) bumpObservedGeneration(ctx context.Context, sc 
 		if err := r.Get(ctx, client.ObjectKeyFromObject(sc), &fresh); err != nil {
 			return err
 		}
-		if fresh.Status.ObservedGeneration == fresh.Generation {
+		changed := false
+		if fresh.Status.ObservedGeneration != fresh.Generation {
+			fresh.Status.ObservedGeneration = fresh.Generation
+			changed = true
+		}
+		if fresh.Status.LastAppliedAt == nil || (r.ObserveInterval > 0 && time.Since(fresh.Status.LastAppliedAt.Time) > r.ObserveInterval/2) {
+			now := metav1.Now()
+			fresh.Status.LastAppliedAt = &now
+			changed = true
+		}
+		if !changed {
 			return nil
 		}
-		fresh.Status.ObservedGeneration = fresh.Generation
 		return r.Status().Update(ctx, &fresh)
 	})
 	if err != nil {
-		logger.Info("observedGeneration update failed (will retry next reconcile)", "name", sc.Name, "err", err.Error())
+		logger.Info("reconcile-marker update failed (will retry next reconcile)", "err", err.Error())
 	}
-}
-
-// isCurrentlyReconciled reports whether the ServerConfig is in a Reconciled=True
-// state. Used to gate status writes during no-op periodic polls so we don't
-// erase a more informative "PATCHed N attribute(s)" message with the generic
-// "all match intent" text on every drift-detection cycle.
-func isCurrentlyReconciled(sc *armadav1.ServerConfig) bool {
-	for _, c := range sc.Status.Conditions {
-		if c.Type == ConditionReconciled {
-			return c.Status == metav1.ConditionTrue
-		}
-	}
-	return false
-}
-
-// setCondition updates or appends a condition by Type. ObservedGeneration is
-// set to the CR's current generation so consumers can detect stale status.
-func setCondition(conds *[]metav1.Condition, condType string, status metav1.ConditionStatus, reason, message string) {
-	now := metav1.Now()
-	for i := range *conds {
-		c := &(*conds)[i]
-		if c.Type != condType {
-			continue
-		}
-		if c.Status != status {
-			c.LastTransitionTime = now
-		}
-		c.Status = status
-		c.Reason = reason
-		c.Message = message
-		return
-	}
-	*conds = append(*conds, metav1.Condition{
-		Type:               condType,
-		Status:             status,
-		LastTransitionTime: now,
-		Reason:             reason,
-		Message:            message,
-	})
 }
 
 func boolPtr(p *bool) string {

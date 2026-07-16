@@ -151,7 +151,7 @@ spec:
               BackupConfigStatus records the controller's observed state. Mirrors the
               ServerConfigStatus shape so operators can reason about both child kinds the
               same way (Phase, ObservedGeneration, Conditions, per-mechanism Observed
-              ledger, bounded RecentPatches action history).
+              ledger, LastAppliedAt). Per-action history goes to Kubernetes Events.
             properties:
               conditions:
                 description: Conditions records detailed status conditions.
@@ -213,42 +213,50 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              observed:
-                description: Observed holds the controller's per-mechanism confirmed
-                  values.
+              etcd:
+                description: |-
+                  Etcd holds the controller's observed etcd state — the producer config read
+                  live from the CronJob PLUS the artifact fields (snapshot freshness/count/
+                  size) read from the backup store. Nil = not managed. Mirrors spec.etcd and
+                  is a superset: the artifact fields have no desired counterpart.
                 properties:
-                  etcd:
-                    description: Etcd holds controller-confirmed etcd field values.
-                      Nil = not managed.
-                    properties:
-                      enabled:
-                        type: boolean
-                      location:
-                        type: string
-                      schedule:
-                        type: string
-                    type: object
-                  s3Sync:
+                  enabled:
                     description: |-
-                      S3Sync holds controller-confirmed S3-sync field values. Nil = not
-                      managed (which is always the case today — S3Sync actuation is not yet
-                      implemented; the S3SyncSupported condition surfaces that fact).
-                    properties:
-                      enabled:
-                        type: boolean
-                    type: object
-                  velero:
-                    description: Velero holds controller-confirmed Velero field values.
-                      Nil = not managed.
-                    properties:
-                      enabled:
-                        type: boolean
-                      location:
-                        type: string
-                      schedule:
-                        type: string
-                    type: object
+                      Enabled / Schedule / Location describe the producer (CronJob) config,
+                      observed live from the cluster.
+                    type: boolean
+                  lastSnapshotTime:
+                    description: |-
+                      LastSnapshotTime is the modification time of the newest snapshot object
+                      in the store. Nil = no snapshot observed (or store not yet read).
+                    format: date-time
+                    type: string
+                  latestSnapshotBytes:
+                    description: |-
+                      LatestSnapshotBytes is the size of the newest snapshot object. Nil =
+                      none observed.
+                    format: int64
+                    type: integer
+                  location:
+                    type: string
+                  schedule:
+                    type: string
+                  snapshotCount:
+                    description: |-
+                      SnapshotCount is how many snapshot objects exist under the cluster's
+                      prefix — a retention-health signal. Nil = store not yet read.
+                    format: int32
+                    type: integer
                 type: object
+              lastAppliedAt:
+                description: |-
+                  LastAppliedAt is the wall-clock time of the most recent successful
+                  reconcile action. See ServerConfigStatus.LastAppliedAt for the
+                  rationale — Conditions[].LastTransitionTime tells operators when
+                  Status last flipped (K8s convention), LastAppliedAt tells them when
+                  the controller last did anything.
+                format: date-time
+                type: string
               observedGeneration:
                 description: |-
                   ObservedGeneration is the spec.generation the controller last successfully
@@ -261,30 +269,30 @@ spec:
                 - Pending
                 - Applied
                 - Diverged
+                - Skipped
                 type: string
-              recentPatches:
+              s3Sync:
                 description: |-
-                  RecentPatches is a bounded list of the last few PATCH actions, newest
-                  first. Capped at 5 entries to keep the status object small.
-                items:
-                  description: RecentPatch is one entry in ServerConfigStatus.RecentPatches.
-                  properties:
-                    message:
-                      description: |-
-                        Message describes which fields were PATCHed, e.g.
-                        "PATCHed 2 attribute(s): IPMILan.1.Enable=Disabled, SSH.1.Enable=Disabled".
-                        Same format as the Reconciled condition's message.
-                      type: string
-                    time:
-                      description: Time is when the PATCH succeeded against the iDRAC.
-                      format: date-time
-                      type: string
-                  required:
-                  - message
-                  - time
-                  type: object
-                type: array
-                x-kubernetes-list-type: atomic
+                  S3Sync holds observed S3-sync state. Nil = not managed (always today —
+                  S3Sync actuation is not implemented; ConditionS3SyncSupported surfaces that).
+                properties:
+                  enabled:
+                    type: boolean
+                type: object
+              velero:
+                description: |-
+                  Velero holds the controller's observed Velero producer config, read live
+                  from the cluster. Nil = not managed. Mirrors spec.velero — desired ↔
+                  observed at matching paths; the spec/status prefix is the label, no
+                  `observed:` wrapper (see docs/reference/DOMAIN-CONTROLLER.md §1).
+                properties:
+                  enabled:
+                    type: boolean
+                  location:
+                    type: string
+                  schedule:
+                    type: string
+                type: object
             type: object
         type: object
     served: true

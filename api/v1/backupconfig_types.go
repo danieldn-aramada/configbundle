@@ -136,19 +136,24 @@ type BackupConfigSpec struct {
 }
 
 // BackupConfigPhase represents the current lifecycle phase.
-// +kubebuilder:validation:Enum=Pending;Applied;Diverged
+// +kubebuilder:validation:Enum=Pending;Applied;Diverged;Skipped
 type BackupConfigPhase string
 
 const (
 	BackupConfigPhasePending  BackupConfigPhase = "Pending"
 	BackupConfigPhaseApplied  BackupConfigPhase = "Applied"
 	BackupConfigPhaseDiverged BackupConfigPhase = "Diverged"
+	// BackupConfigPhaseSkipped means the controller deliberately did not
+	// reconcile this CR (e.g. no velero/etcd block to actuate). The Reconciled
+	// condition is Unknown, not False — this is an expected, benign state, not
+	// a fault. Mirrors ServerConfigPhaseSkipped.
+	BackupConfigPhaseSkipped BackupConfigPhase = "Skipped"
 )
 
 // BackupConfigStatus records the controller's observed state. Mirrors the
 // ServerConfigStatus shape so operators can reason about both child kinds the
 // same way (Phase, ObservedGeneration, Conditions, per-mechanism Observed
-// ledger, bounded RecentPatches action history).
+// ledger, LastAppliedAt). Per-action history goes to Kubernetes Events.
 type BackupConfigStatus struct {
 	// Phase is the current lifecycle phase.
 	// +optional
@@ -165,22 +170,40 @@ type BackupConfigStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Observed holds the controller's per-mechanism confirmed values.
+	// Velero holds the controller's observed Velero producer config, read live
+	// from the cluster. Nil = not managed. Mirrors spec.velero — desired ↔
+	// observed at matching paths; the spec/status prefix is the label, no
+	// `observed:` wrapper (see docs/reference/DOMAIN-CONTROLLER.md §1).
 	// +optional
-	Observed ObservedBackup `json:"observed,omitempty"`
+	Velero *ObservedVeleroStatus `json:"velero,omitempty"`
 
-	// RecentPatches is a bounded list of the last few PATCH actions, newest
-	// first. Capped at 5 entries to keep the status object small.
+	// Etcd holds the controller's observed etcd state — the producer config read
+	// live from the CronJob PLUS the artifact fields (snapshot freshness/count/
+	// size) read from the backup store. Nil = not managed. Mirrors spec.etcd and
+	// is a superset: the artifact fields have no desired counterpart.
 	// +optional
-	// +listType=atomic
-	RecentPatches []RecentPatch `json:"recentPatches,omitempty"`
+	Etcd *ObservedEtcdStatus `json:"etcd,omitempty"`
+
+	// S3Sync holds observed S3-sync state. Nil = not managed (always today —
+	// S3Sync actuation is not implemented; ConditionS3SyncSupported surfaces that).
+	// +optional
+	S3Sync *ObservedS3SyncStatus `json:"s3Sync,omitempty"`
+
+	// LastAppliedAt is the wall-clock time of the most recent successful
+	// reconcile action. See ServerConfigStatus.LastAppliedAt for the
+	// rationale — Conditions[].LastTransitionTime tells operators when
+	// Status last flipped (K8s convention), LastAppliedAt tells them when
+	// the controller last did anything.
+	// +optional
+	LastAppliedAt *metav1.Time `json:"lastAppliedAt,omitempty"`
 }
 
-// ObservedBackup contains per-mechanism observed-state ledgers. Each block is
-// a pointer so absence in status means "controller does not manage this
-// mechanism" — distinct from "manages it but all fields are unset". Value-type
-// structs with omitempty still marshal to `{}` in JSON, which reads as "yes I
-// looked, and it's empty" — a lie for unmanaged mechanisms like S3Sync today.
+// ObservedBackup is the controller's transient live-read aggregate — the shape
+// readLiveObserved builds each reconcile and hands to updateObservedStatus,
+// which fans it out onto the flattened status blocks (status.velero/etcd/s3Sync).
+// It is NOT a persisted status field itself. Each block is a pointer so a nil
+// block means "controller does not manage this mechanism" — distinct from
+// "manages it but all fields are unset".
 type ObservedBackup struct {
 	// Velero holds controller-confirmed Velero field values. Nil = not managed.
 	// +optional
@@ -211,12 +234,34 @@ type ObservedVeleroStatus struct {
 
 // ObservedEtcdStatus mirrors the controller-managed subset of EtcdBackupSpec.
 type ObservedEtcdStatus struct {
+	// Enabled / Schedule / Location describe the producer (CronJob) config,
+	// observed live from the cluster.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 	// +optional
 	Schedule *string `json:"schedule,omitempty"`
 	// +optional
 	Location *string `json:"location,omitempty"`
+
+	// The fields below describe the ARTIFACTS — the actual snapshots in the
+	// backup store — read live by bc-controller. This is the resource bc truly
+	// manages for etcd (it owns the full stack; no independent subsystem
+	// observes the store). See docs/reference/BACKUP.md.
+
+	// LastSnapshotTime is the modification time of the newest snapshot object
+	// in the store. Nil = no snapshot observed (or store not yet read).
+	// +optional
+	LastSnapshotTime *metav1.Time `json:"lastSnapshotTime,omitempty"`
+
+	// SnapshotCount is how many snapshot objects exist under the cluster's
+	// prefix — a retention-health signal. Nil = store not yet read.
+	// +optional
+	SnapshotCount *int32 `json:"snapshotCount,omitempty"`
+
+	// LatestSnapshotBytes is the size of the newest snapshot object. Nil =
+	// none observed.
+	// +optional
+	LatestSnapshotBytes *int64 `json:"latestSnapshotBytes,omitempty"`
 }
 
 // ObservedS3SyncStatus mirrors the controller-managed subset of S3SyncSpec.

@@ -1,14 +1,54 @@
 package serverconfig
 
 import (
+	"encoding/json"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"k8s.io/utils/ptr"
 
 	armadav1 "github.com/armada/configbundle/api/v1"
 )
+
+// TestServerConfigStatus_JSONRoundTrip pins the reshaped status serialization:
+// observed iDRAC state lives at status.idracSettings (not the old
+// status.observed.idracSettings wrapper), and firmware is folded into
+// status.idracSettings.firmwareVersion (not a top-level observedFirmwareVersion).
+func TestServerConfigStatus_JSONRoundTrip(t *testing.T) {
+	in := armadav1.ServerConfigStatus{
+		IdracSettings: armadav1.ObservedIdracSettingsStatus{
+			SSHEnabled:      ptr.To(false),
+			FirmwareVersion: ptr.To("7.20.10.05"),
+		},
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	js := string(b)
+	for _, want := range []string{`"idracSettings":`, `"sshEnabled":false`, `"firmwareVersion":"7.20.10.05"`} {
+		if !strings.Contains(js, want) {
+			t.Errorf("marshalled status missing %q\ngot: %s", want, js)
+		}
+	}
+	for _, bad := range []string{`"observed":`, `"observedFirmwareVersion":`} {
+		if strings.Contains(js, bad) {
+			t.Errorf("marshalled status must not contain %q (reshape removed it)\ngot: %s", bad, js)
+		}
+	}
+	var out armadav1.ServerConfigStatus
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.IdracSettings.SSHEnabled == nil || *out.IdracSettings.SSHEnabled {
+		t.Errorf("round-trip sshEnabled = %v, want false", out.IdracSettings.SSHEnabled)
+	}
+	if out.IdracSettings.FirmwareVersion == nil || *out.IdracSettings.FirmwareVersion != "7.20.10.05" {
+		t.Errorf("round-trip firmwareVersion = %v, want 7.20.10.05", out.IdracSettings.FirmwareVersion)
+	}
+}
 
 // allFields returns an allow-everything map for tests that don't exercise the
 // field-allowlist gate.

@@ -1,0 +1,30 @@
+# ServiceMonitor for bc-controller (`configbundle-backupconfig-controller-metrics` Service).
+# Same shape as the cb + sc monitors — the `release: kube-prometheus-stack`
+# label is what makes the Prom Operator's serviceMonitorSelector match this
+# object. bc-controller is on the pod network (no hostNetwork), so no
+# additional CiliumNetworkPolicy is needed to reach its /metrics endpoint.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: configbundle-backupconfig-controller
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: backupconfig-controller
+    app.kubernetes.io/managed-by: kustomize
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - configbundle-system
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: backupconfig-controller
+  endpoints:
+    - port: https
+      path: /metrics
+      scheme: https
+      interval: 30s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true

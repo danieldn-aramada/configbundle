@@ -1,0 +1,105 @@
+# Alerting rules for the configbundle domain controllers, realizing the metrics
+# design in docs/reference/DOMAIN-CONTROLLER.md §6. The `release:
+# kube-prometheus-stack` label lets the Prometheus operator discover this rule
+# (same mechanism as the ServiceMonitors).
+#
+# Note where the etcd freshness VERDICT lives: here, as a PromQL threshold on the
+# raw `..._status_etcd_last_snapshot_seconds` timestamp — NOT in the controller.
+# That is the whole point of §6: the controller publishes the fact; the alerting
+# layer owns the policy, tunable per environment without a redeploy.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: configbundle-domain-controllers
+  labels:
+    app.kubernetes.io/name: configbundle
+    app.kubernetes.io/managed-by: kustomize
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # "Is the controller running?" — fires when Prometheus has no healthy scrape
+    # target (up==0, or the target vanished). `up` is Prometheus's built-in
+    # per-scrape health metric, NOT one of ours. This is the only alert that still
+    # works when a controller is dead (its configbundle_* series die with it).
+    - name: configbundle.availability
+      rules:
+        - alert: ServerConfigControllerDown
+          expr: absent(up{job="configbundle-serverconfig-controller-metrics"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+        - alert: BackupConfigControllerDown
+          expr: absent(up{job="configbundle-backupconfig-controller-metrics"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+        - alert: ConfigBundleControllerDown
+          expr: absent(up{job="configbundle-controller-metrics"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+
+    - name: configbundle.serverconfig
+      rules:
+        - alert: ServerConfigReconcileFailing
+          # reconcile_success == 0 → managed AND not converged. Skipped servers
+          # are ABSENT from this metric, so they can never fire this alert.
+          expr: configbundle_serverconfig_reconcile_success == 0
+          for: 10m
+          labels:
+            severity: warning
+            domain: serverconfig
+          annotations:
+            summary: "ServerConfig {{ $labels.server }} ({{ $labels.oob_ip }}) failing to reconcile"
+            description: >-
+              sc-controller's last reconcile of ServerConfig {{ $labels.server }}
+              (iDRAC {{ $labels.oob_ip }}) did not converge (reconcile_success=0)
+              for 10m. The reason is on the CR:
+              `kubectl describe serverconfig {{ $labels.server }}`
+              (Reconciled condition + Warning events).
+
+    - name: configbundle.backupconfig
+      rules:
+        - alert: BackupConfigReconcileFailing
+          expr: configbundle_backupconfig_reconcile_success == 0
+          for: 10m
+          labels:
+            severity: warning
+            domain: backupconfig
+          annotations:
+            summary: "BackupConfig {{ $labels.cluster }} failing to reconcile"
+            description: >-
+              bc-controller's last reconcile of BackupConfig {{ $labels.cluster }}
+              did not converge for 10m. Reason on the CR:
+              `kubectl describe backupconfig {{ $labels.cluster }}`.
+
+        - alert: EtcdSnapshotStale
+          # The freshness verdict: newest snapshot older than the threshold.
+          # 93600s = 26h — an hourly/daily etcd backup that has missed > a day.
+          # Tune per environment HERE, not in the controller. Only present when
+          # ETCD artifact observation is enabled (BACKUP_OBSERVE_INTERVAL set +
+          # AZURE_* creds); otherwise the series is absent and this never fires.
+          expr: time() - configbundle_backupconfig_status_etcd_last_snapshot_seconds > 93600
+          for: 30m
+          labels:
+            severity: warning
+            domain: backupconfig
+          annotations:
+            summary: "etcd snapshots stale for {{ $labels.cluster }}"
+            description: >-
+              The newest etcd snapshot for cluster {{ $labels.cluster }} is older
+              than 26h — backups may have stopped landing in the store even if the
+              CronJob is still configured.
+
+        - alert: EtcdNoSnapshotsObserved
+          # Observation is on (count series present) but the store is empty.
+          expr: configbundle_backupconfig_status_etcd_snapshot_count == 0
+          for: 1h
+          labels:
+            severity: warning
+            domain: backupconfig
+          annotations:
+            summary: "no etcd snapshots observed for {{ $labels.cluster }}"
+            description: >-
+              Artifact observation is enabled but zero etcd snapshots exist under
+              cluster {{ $labels.cluster }}'s prefix (count=0 for 1h).

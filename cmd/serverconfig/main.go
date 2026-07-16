@@ -185,6 +185,7 @@ func main() {
 		CredentialsNamespace:  cfg.CredentialsNamespace,
 		CredentialsSecretName: cfg.CredentialsSecretName,
 		ObserveInterval:       cfg.ObserveInterval,
+		Recorder:              mgr.GetEventRecorderFor("serverconfig-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "serverconfig")
 		os.Exit(1)

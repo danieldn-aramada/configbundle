@@ -69,9 +69,12 @@ Read the relevant topic doc before starting work in that area. Each doc's `## Se
 
 | Working on | Read |
 |---|---|
+| Building/changing a domain controller — spec↔status shape, observe→status+metrics, conditions, watch-vs-poll | `docs/reference/DOMAIN-CONTROLLER.md` |
+| Full catalog of published Prometheus metrics (names, types, labels) for sc/bc controllers | `docs/reference/METRICS.md` |
 | Bundler HTTP service, enricher API, Orbital GraphQL integration | `docs/reference/API.md` |
 | OCI artifact structure, layers, media types, signing, tags | `docs/reference/BUNDLE.md` |
 | CRD types, ConfigBundle CR, kubebuilder annotations, SSA | `docs/reference/CRD.md` |
+| bc-controller, etcd/Velero backups, backup status + metrics, observe model | `docs/reference/BACKUP.md` |
 | Edge dispatch, cosign verification, divergence, takeover, reclaim | `docs/reference/EDGE.md` |
 | Orbital GraphQL data model, bundler query logic, local overrides | `docs/reference/ORBITAL.md` |
 | OCI bundler pipeline, ConfigBundle integration | `~/armada/orbital/docs/configbundle-integration.md` |

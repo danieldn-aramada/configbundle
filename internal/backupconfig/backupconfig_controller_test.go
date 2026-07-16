@@ -2,23 +2,116 @@ package backupconfig
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	armadav1 "github.com/armada/configbundle/api/v1"
 )
+
+// TestMetricsEndpoint_BackupConfig is the integration check for §6: after a real
+// reconcile, every expected metric family actually renders on the /metrics HTTP
+// endpoint (promhttp over the controller-runtime registry) — proving they are
+// registered and scrapeable, which the unit collector tests don't cover.
+func TestMetricsEndpoint_BackupConfig(t *testing.T) {
+	bc := &armadav1.BackupConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "metrics-int"},
+		Spec: armadav1.BackupConfigSpec{
+			OrbID:        "validate:etcd",
+			ClusterOrbID: "validate:cluster",
+			Etcd: &armadav1.EtcdBackupSpec{
+				OrbID:    "validate:etcd-block",
+				Enabled:  ptr.To(true),
+				Schedule: ptr.To("0 3 * * *"),
+				Location: ptr.To("https://acct.blob.core.windows.net/etcd/c1"),
+			},
+		},
+	}
+	defer func() {
+		removeReconcileSuccess("metrics-int")
+		removeEtcdArtifacts("metrics-int")
+	}()
+
+	r, _ := newReconciler(t, bc)
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "metrics-int"}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	srv := httptest.NewServer(promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	page := string(body)
+
+	for _, want := range []string{
+		`configbundle_backupconfig_reconcile_success{cluster="metrics-int",orb_id="validate:etcd"} 1`,
+		`configbundle_backupconfig_reconcile_timestamp_seconds{cluster="metrics-int",orb_id="validate:etcd"}`,
+		`configbundle_backup_etcd_cronjob_present{cluster="metrics-int",orb_id="validate:etcd"}`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("/metrics endpoint missing %q", want)
+		}
+	}
+}
+
+// TestBackupConfigStatus_JSONRoundTrip pins the reshaped status serialization:
+// observed state lives at status.{velero,etcd,s3Sync} directly (not the old
+// status.observed.* wrapper).
+func TestBackupConfigStatus_JSONRoundTrip(t *testing.T) {
+	in := armadav1.BackupConfigStatus{
+		Etcd: &armadav1.ObservedEtcdStatus{
+			Schedule:      ptr.To("0 3 * * *"),
+			SnapshotCount: ptr.To(int32(7)),
+		},
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	js := string(b)
+	for _, want := range []string{`"etcd":`, `"schedule":"0 3 * * *"`, `"snapshotCount":7`} {
+		if !strings.Contains(js, want) {
+			t.Errorf("marshalled status missing %q\ngot: %s", want, js)
+		}
+	}
+	if strings.Contains(js, `"observed":`) {
+		t.Errorf("marshalled status must not contain the removed 'observed' wrapper\ngot: %s", js)
+	}
+	var out armadav1.BackupConfigStatus
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Etcd == nil || out.Etcd.SnapshotCount == nil || *out.Etcd.SnapshotCount != 7 {
+		t.Errorf("round-trip etcd.snapshotCount = %+v, want 7", out.Etcd)
+	}
+}
 
 // testLogger returns a no-op logr.Logger for tests that call methods
 // requiring a logger but don't care about the output.
@@ -76,6 +169,10 @@ func newReconciler(t *testing.T, objs ...client.Object) (*BackupConfigReconciler
 		EtcdctlImage:        testEtcdctlImage,
 		UploadImage:         testUploadImage,
 		CredentialSecret:    testCredSecret,
+		// FakeRecorder with a generous buffer — tests that assert on Events
+		// read from r.Recorder.(*record.FakeRecorder).Events; tests that don't
+		// care just let events fall into the channel and get GC'd.
+		Recorder: record.NewFakeRecorder(32),
 	}
 	return r, c
 }
@@ -172,8 +269,18 @@ func TestReconcile_CreatesVeleroScheduleAndEtcdCronJob(t *testing.T) {
 	if got.Status.Phase != armadav1.BackupConfigPhaseApplied {
 		t.Errorf("phase: got %q", got.Status.Phase)
 	}
-	if len(got.Status.RecentPatches) == 0 {
-		t.Errorf("expected at least one RecentPatch entry")
+	if got.Status.LastAppliedAt == nil {
+		t.Errorf("expected status.lastAppliedAt to be set after a successful reconcile")
+	}
+	// The Recorder should have emitted an "Applied" Event with per-PATCH detail.
+	fr := r.Recorder.(*record.FakeRecorder)
+	select {
+	case ev := <-fr.Events:
+		if !strings.Contains(ev, "Applied") || !strings.Contains(ev, "velero/") {
+			t.Errorf("expected an Applied event mentioning velero PATCH; got %q", ev)
+		}
+	default:
+		t.Errorf("expected at least one Event on r.Recorder.Events; got none")
 	}
 }
 
@@ -320,7 +427,7 @@ func hasControllerOwnerRef(refs []metav1.OwnerReference, kind, name string) bool
 	return false
 }
 
-func TestReconcile_NoBlocksNoOp(t *testing.T) {
+func TestReconcile_NoBlocksSkipped(t *testing.T) {
 	bc := &armadav1.BackupConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "empty"},
 		Spec:       armadav1.BackupConfigSpec{OrbID: "colo:cluster-empty"},
@@ -344,6 +451,32 @@ func TestReconcile_NoBlocksNoOp(t *testing.T) {
 		Namespace: testVeleroNs, Name: veleroScheduleName(bc),
 	}, sched); err == nil {
 		t.Errorf("velero schedule should not exist for empty backupconfig")
+	}
+
+	// Status surfaces the skip: Phase=Skipped, Reconciled=Unknown (not False —
+	// an empty backup config is benign, not a fault), and no Warning Event.
+	var got armadav1.BackupConfig
+	if err := c.Get(context.Background(), types.NamespacedName{Name: bc.Name}, &got); err != nil {
+		t.Fatalf("get bc: %v", err)
+	}
+	if got.Status.Phase != armadav1.BackupConfigPhaseSkipped {
+		t.Errorf("phase = %q, want Skipped", got.Status.Phase)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, ConditionReconciled)
+	if cond == nil {
+		t.Fatalf("Reconciled condition missing")
+	}
+	if cond.Status != metav1.ConditionUnknown {
+		t.Errorf("Reconciled.status = %q, want Unknown", cond.Status)
+	}
+	if cond.Reason != "NoBackupBlocks" {
+		t.Errorf("Reconciled.reason = %q, want NoBackupBlocks", cond.Reason)
+	}
+	fr := r.Recorder.(*record.FakeRecorder)
+	select {
+	case ev := <-fr.Events:
+		t.Errorf("skip must NOT emit an Event (it is not a fault); got %q", ev)
+	default:
 	}
 }
 
@@ -395,10 +528,27 @@ func TestReconcile_Idempotent(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: bc.Name}, &got); err != nil {
 		t.Fatalf("get bc: %v", err)
 	}
-	// RecentPatches grew only on the first reconcile (deltas existed). Subsequent
-	// reconciles found no deltas and skipped the PATCH path → no new entries.
-	if len(got.Status.RecentPatches) != 1 {
-		t.Errorf("expected exactly one RecentPatch (first reconcile only), got %d", len(got.Status.RecentPatches))
+	// Only the first reconcile has real deltas to PATCH → only one "Applied"
+	// Event carrying PATCH detail. Subsequent reconciles are always-apply
+	// no-ops (SSA idempotent, no delta) → no additional Applied Events.
+	fr := r.Recorder.(*record.FakeRecorder)
+	applied := 0
+	for done := false; !done; {
+		select {
+		case ev := <-fr.Events:
+			if strings.Contains(ev, "Applied") {
+				applied++
+			}
+		default:
+			done = true
+		}
+	}
+	if applied != 1 {
+		t.Errorf("expected exactly one Applied Event (first reconcile PATCHed; rest were no-ops), got %d", applied)
+	}
+	// LastAppliedAt should be set — bumped on the first reconcile at minimum.
+	if got.Status.LastAppliedAt == nil {
+		t.Errorf("expected status.lastAppliedAt to be set")
 	}
 }
 

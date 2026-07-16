@@ -1,0 +1,38 @@
+# Turns on etcd artifact-observation on dev-main: sets the observe interval
+# (the single switch — >0 = ON) and mounts the read-scoped Azure service
+# principal from the `az-storage-creds` Secret. env is merged by name, so this
+# overrides BACKUP_OBSERVE_INTERVAL from the base (0s) and adds the rest.
+#
+# ETCD_SNAPSHOT_STALE_AFTER is a STALENESS ALARM only — when the newest snapshot
+# is older than this, the BackupsFresh condition flips to False (SnapshotStale).
+# It does NOT delete anything; retention is not implemented.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: configbundle-backupconfig-controller
+  namespace: configbundle-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        env:
+        - name: BACKUP_OBSERVE_INTERVAL
+          value: "30m"
+        - name: ETCD_SNAPSHOT_STALE_AFTER
+          value: "26h"
+        - name: AZURE_TENANT_ID
+          valueFrom:
+            secretKeyRef:
+              name: az-storage-creds
+              key: tenant-id
+        - name: AZURE_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: az-storage-creds
+              key: client-id
+        - name: AZURE_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: az-storage-creds
+              key: client-secret

@@ -1,0 +1,16 @@
+# Grafana dashboard for the configbundle domain controllers, provisioned as a
+# ConfigMap the kube-prometheus-stack Grafana sidecar auto-imports (the
+# `grafana_dashboard: "1"` label). Lands in `monitoring` where Grafana lives.
+#
+# This is a STARTER built from the DOMAIN-CONTROLLER.md §9 queries — refine in
+# the Grafana UI and re-export as needed; the PromQL is the source of truth.
+namespace: monitoring
+
+configMapGenerator:
+  - name: configbundle-domain-dashboard
+    files:
+      - configbundle-domain.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"

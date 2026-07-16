@@ -1,0 +1,19 @@
+# Binds the bc-controller SA to the shared metrics-auth-role ClusterRole. See
+# ../serverconfig/metrics_auth_role_binding.yaml for the full rationale — same
+# pattern (controller-runtime secure metrics needs TokenReview +
+# SubjectAccessReview permission to verify incoming Prom scrape tokens).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backupconfig-metrics-auth-rolebinding
+  labels:
+    app.kubernetes.io/name: backupconfig-controller
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: backupconfig-controller
+  namespace: system

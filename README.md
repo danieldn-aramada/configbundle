@@ -227,6 +227,7 @@ PR workflow, tests, code style, release process, AI-assistant conventions.
 | Bundler HTTP service, enricher API, Orbital GraphQL integration | [`docs/reference/API.md`](docs/reference/API.md) |
 | OCI artifact structure, layers, media types, signing, tags | [`docs/reference/BUNDLE.md`](docs/reference/BUNDLE.md) |
 | CRD types, kubebuilder annotations, SSA semantics | [`docs/reference/CRD.md`](docs/reference/CRD.md) |
+| bc-controller, etcd/Velero backups, backup status + metrics | [`docs/reference/BACKUP.md`](docs/reference/BACKUP.md) |
 | Edge dispatch, cosign, divergence, reclaim, handback | [`docs/reference/EDGE.md`](docs/reference/EDGE.md) |
 | Orbital GraphQL data model, override semantics | [`docs/reference/ORBITAL.md`](docs/reference/ORBITAL.md) |
 

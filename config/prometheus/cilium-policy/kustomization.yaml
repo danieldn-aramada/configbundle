@@ -1,0 +1,12 @@
+# CiliumNetworkPolicy that opens node-port 8443 for Prom to scrape
+# hostNetwork-enabled configbundle controllers (specifically sc-controller,
+# which needs hostNetwork to reach the iDRAC OOB subnet).
+#
+# Lives in the `monitoring` namespace — the CNP's endpointSelector targets
+# the Prom pod that lives there. Separate namespace from service-monitors/
+# (which lives in configbundle-system), so this sub-overlay carries its own
+# namespace transformer independent from the parent.
+namespace: monitoring
+
+resources:
+- prometheus-configbundle-scrape-allow.yaml

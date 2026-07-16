@@ -58,3 +58,13 @@ rules:
   - update
   - patch
   - delete
+# Event emission — replaces the bounded status.recentPatches[] we used to
+# maintain. controller-runtime writes core-v1 Events via EventRecorder;
+# needs create + patch (patch is used for dedup increments of count/lastTimestamp).
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch

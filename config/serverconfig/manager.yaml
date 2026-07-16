@@ -90,13 +90,13 @@ spec:
             configMapKeyRef:
               name: serverconfig-controller-config
               key: credentialsSecret
-        # Drift-detection polling: re-reads iDRAC every interval regardless of
-        # CR changes so out-of-band edits show up in metrics. Empty/unset =
-        # disabled (event-driven only) — safe for local `go run`. K8s deploy
-        # enables it explicitly. Aggressive values cost iDRAC load; 1-5min is
-        # the conventional band.
+        # Drift-detection polling: every interval the controller re-reads the
+        # iDRAC via Redfish and re-asserts spec (PATCHing back any out-of-band
+        # change), independent of CR changes. Empty/unset = disabled
+        # (event-driven only) — safe for local `go run`. Aggressive values cost
+        # iDRAC load; 1-5min is the conventional band.
         - name: IDRAC_OBSERVE_INTERVAL
-          value: "5m"
+          value: "1m"
         ports:
         - containerPort: 8092
           name: health

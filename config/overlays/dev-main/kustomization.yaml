@@ -1,0 +1,15 @@
+# dev-main overlay — turns on etcd artifact-observation for the colo-dev-main
+# management cluster, which has the `az-storage-creds` Secret provisioned.
+#
+# The shared base (config/default) ships observation OFF and credential-free.
+# This overlay is the ONLY place the Azure service-principal creds are wired.
+# Deploy with:
+#   kubectl apply -k config/overlays/dev-main
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../default
+
+patches:
+- path: bc_observe_patch.yaml
