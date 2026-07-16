@@ -98,6 +98,20 @@ type S3SyncSpec struct {
 	// Enabled toggles the S3-sync mechanism on or off.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
+
+	// Schedule is a cron expression for when the sync runs (e.g. "0 4 * * *").
+	// +optional
+	Schedule *string `json:"schedule,omitempty"`
+
+	// SourceLocation is the S3-compatible URL to sync from
+	// (e.g. "http://rook-ceph-rgw.rook-ceph.svc:80/bucket/prefix").
+	// +optional
+	SourceLocation *string `json:"sourceLocation,omitempty"`
+
+	// DestLocation is the S3-compatible URL to sync to
+	// (e.g. "https://dest-endpoint/bucket/prefix").
+	// +optional
+	DestLocation *string `json:"destLocation,omitempty"`
 }
 
 // BackupConfigSpec is the projected desired state for one ClusterBackup node.
@@ -268,6 +282,12 @@ type ObservedEtcdStatus struct {
 type ObservedS3SyncStatus struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
+	// +optional
+	Schedule *string `json:"schedule,omitempty"`
+	// +optional
+	SourceLocation *string `json:"sourceLocation,omitempty"`
+	// +optional
+	DestLocation *string `json:"destLocation,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -90,8 +90,11 @@ type VeleroBackupResult struct {
 }
 
 type S3SyncResult struct {
-	OrbID   string `json:"orbId"`
-	Enabled bool   `json:"enabled"`
+	OrbID          string `json:"orbId"`
+	Enabled        bool   `json:"enabled"`
+	Schedule       string `json:"schedule"`
+	SourceLocation string `json:"sourceLocation"`
+	DestLocation   string `json:"destLocation"`
 }
 
 // ServerResult is the GraphQL response shape for a Server node.
@@ -192,6 +195,9 @@ query ConfigBundleByOrbID($orbId: String!) {
         s3Sync {
           orbId
           enabled
+          schedule
+          sourceLocation
+          destLocation
         }
       }
     }

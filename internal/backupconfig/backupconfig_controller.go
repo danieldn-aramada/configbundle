@@ -93,6 +93,18 @@ type BackupConfigReconciler struct {
 	// periodic poll (watch/event-driven only).
 	ObserveInterval time.Duration
 
+	// S3SyncNamespace is where the S3 Sync CronJob is written.
+	S3SyncNamespace string
+
+	// S3SyncRcloneImage is the container image that runs rclone sync.
+	S3SyncRcloneImage string
+
+	// S3SyncCredSecret is the K8s Secret name (in S3SyncNamespace) holding
+	// S3 credentials. Data keys required: source-access-key, source-secret-key,
+	// dest-access-key, dest-secret-key.
+	S3SyncCredSecret string
+
+
 	// Recorder emits per-action Kubernetes Events (Velero Schedule PATCHed,
 	// etcd CronJob PATCHed, PATCH failed, etc.) so operators can see action
 	// history via `kubectl describe backupconfig <name>` alongside the
@@ -180,20 +192,10 @@ func (r *BackupConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		return reconcile.Result{}, err
 	}
 
-	// S3Sync actuation is not implemented yet — a spec.s3Sync block travels
-	// end-to-end (bundler → cb-controller decomposition → BackupConfig CR)
-	// but no reconciler writes it to a cluster resource. Log at V(1) so the
-	// spec presence is visible without cluttering the info-level log stream.
-	// TODO: implement S3Sync reconciler (needs its own actuator design).
-	if bc.Spec.S3Sync != nil {
-		logger.V(1).Info("spec.s3Sync present but S3Sync actuation not implemented; ignoring",
-			"s3SyncOrbId", bc.Spec.S3Sync.OrbID)
-	}
-
 	// No reconcilable blocks — deliberately skip. Surface it on status
 	// (Phase=Skipped, Reconciled=Unknown) so `kubectl describe` explains the
 	// no-op, consistent with sc-controller's skip handling.
-	if bc.Spec.Velero == nil && bc.Spec.Etcd == nil {
+	if bc.Spec.Velero == nil && bc.Spec.Etcd == nil && bc.Spec.S3Sync == nil {
 		logger.V(1).Info("no velero or etcd block on backupconfig; skipping",
 			"orbId", bc.Spec.OrbID)
 		r.setStatusSkipped(ctx, &bc, "NoBackupBlocks",
@@ -223,6 +225,19 @@ func (r *BackupConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 			r.setStatusFailed(ctx, &bc, "EtcdPatchFailed", err.Error())
 			recordReconcileError(bc.Name, bc.Spec.OrbID, "EtcdPatchFailed")
 			return reconcile.Result{}, fmt.Errorf("reconcile etcd: %w", err)
+		}
+		if msg != "" {
+			patchMessages = append(patchMessages, msg)
+		}
+	}
+
+	if bc.Spec.S3Sync != nil {
+		msg, err := r.reconcileS3Sync(ctx, &bc)
+		if err != nil {
+			logger.Error(err, "reconcile S3Sync CronJob", "name", bc.Name)
+			r.setStatusFailed(ctx, &bc, "S3SyncPatchFailed", err.Error())
+			recordReconcileError(bc.Name, "S3SyncPatchFailed")
+			return reconcile.Result{}, fmt.Errorf("reconcile s3sync: %w", err)
 		}
 		if msg != "" {
 			patchMessages = append(patchMessages, msg)
@@ -402,6 +417,16 @@ func (r *BackupConfigReconciler) readLiveObserved(ctx context.Context, bc *armad
 		}
 		out.Etcd = e
 	}
+	
+	if bc.Spec.S3Sync != nil {
+		s, err := observeS3Sync(ctx, r.Client, r.S3SyncNamespace, s3SyncCronJobName(bc))
+		if err != nil {
+			logger.Info("observe s3sync live state failed; reporting as absent this reconcile",
+				"name", bc.Name, "err", err.Error())
+		}
+		out.S3Sync = s
+	}
+
 	return out
 }
 
@@ -410,7 +435,21 @@ func (r *BackupConfigReconciler) readLiveObserved(ctx context.Context, bc *armad
 // handles the nil-vs-empty distinction inline.
 func observedEqual(a, b armadav1.ObservedBackup) bool {
 	return backupBlockEqual(a.Velero, b.Velero) &&
-		etcdBlockEqual(a.Etcd, b.Etcd)
+		etcdBlockEqual(a.Etcd, b.Etcd) &&
+		s3syncBlockEqual(a.S3Sync, b.S3Sync)
+}
+
+func s3syncBlockEqual(a, b *armadav1.ObservedS3SyncStatus) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return boolPtrEqual(a.Enabled, b.Enabled) &&
+		stringPtrEqual(a.Schedule, b.Schedule) &&
+		stringPtrEqual(a.SourceLocation, b.SourceLocation) &&
+		stringPtrEqual(a.DestLocation, b.DestLocation)
 }
 
 func backupBlockEqual(a, b *armadav1.ObservedVeleroStatus) bool {
@@ -557,23 +596,17 @@ func (r *BackupConfigReconciler) writeStatus(ctx context.Context, bc *armadav1.B
 	}
 }
 
-// syncS3SyncCondition mirrors spec.s3Sync presence into the S3SyncSupported
-// condition. Present → False/NotImplemented. Absent → condition removed so
-// stale "unsupported" state does not linger on a CR that dropped its s3Sync
-// block. Called from writeStatus so every status write keeps the condition
-// in lockstep with the current spec.
+// syncS3SyncCondition removes any stale S3SyncSupported condition. S3Sync is
+// now implemented so the condition is no longer written; this cleanup ensures
+// CRs that were updated while the stub was live do not keep the False condition.
 func syncS3SyncCondition(bc *armadav1.BackupConfig) {
 	if bc.Spec.S3Sync != nil {
-		meta.SetStatusCondition(&bc.Status.Conditions, metav1.Condition{
-			Type:               ConditionS3SyncSupported,
-			Status:             metav1.ConditionFalse,
-			Reason:             "NotImplemented",
-			Message:            "spec.s3Sync present; S3Sync actuation not yet implemented",
-			ObservedGeneration: bc.Generation,
-		})
+		setCondition(&bc.Status.Conditions, ConditionS3SyncSupported,
+			metav1.ConditionFalse, "NotImplemented",
+			"spec.s3Sync present; S3Sync actuation not yet implemented")
 		return
 	}
-	meta.RemoveStatusCondition(&bc.Status.Conditions, ConditionS3SyncSupported)
+	removeCondition(&bc.Status.Conditions, ConditionS3SyncSupported)
 }
 
 // markReconcileSuccess bumps status.observedGeneration and status.lastAppliedAt
