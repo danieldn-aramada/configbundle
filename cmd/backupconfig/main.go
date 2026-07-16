@@ -157,7 +157,10 @@ func main() {
 		"etcd", cfg.EtcdBackupNamespace,
 		"etcdctlImage", cfg.EtcdctlImage,
 		"uploadImage", cfg.UploadImage,
-		"credentialSecret", cfg.CredentialSecret)
+		"credentialSecret", cfg.CredentialSecret,
+		"s3sync", cfg.S3SyncNamespace,
+		"s3syncRcloneImage", cfg.S3SyncRcloneImage,
+		"s3syncCredSecret", cfg.S3SyncCredSecret)
 
 	reconciler := &backupconfig.BackupConfigReconciler{
 		Client:              mgr.GetClient(),
@@ -168,6 +171,9 @@ func main() {
 		UploadImage:         cfg.UploadImage,
 		CredentialSecret:    cfg.CredentialSecret,
 		ObserveInterval:     cfg.ObserveInterval,
+		S3SyncNamespace:     cfg.S3SyncNamespace,
+		S3SyncRcloneImage:   cfg.S3SyncRcloneImage,
+		S3SyncCredSecret:    cfg.S3SyncCredSecret,
 		Recorder:            mgr.GetEventRecorderFor("backupconfig-controller"),
 	}
 
