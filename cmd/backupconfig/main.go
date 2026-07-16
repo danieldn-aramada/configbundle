@@ -166,7 +166,7 @@ func main() {
 		setupLog.Info("drift-detection polling disabled (event-driven only); set BACKUP_OBSERVE_INTERVAL to enable")
 	}
 
-	if err := (&backupconfig.BackupConfigReconciler{
+	reconciler := &backupconfig.BackupConfigReconciler{
 		Client:                      mgr.GetClient(),
 		Scheme:                      mgr.GetScheme(),
 		VeleroNamespace:             cfg.VeleroNamespace,
@@ -181,17 +181,7 @@ func main() {
 		VeleroAzureResourceGroup:    cfg.VeleroAzureResourceGroup,
 		VeleroAzureSubscriptionID:   cfg.VeleroAzureSubscriptionID,
 		VeleroAzureCredentialSecret: cfg.VeleroAzureCredentialSecret,
-	}).SetupWithManager(mgr); err != nil {
-	reconciler := &backupconfig.BackupConfigReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		VeleroNamespace:     cfg.VeleroNamespace,
-		EtcdBackupNamespace: cfg.EtcdBackupNamespace,
-		EtcdctlImage:        cfg.EtcdctlImage,
-		UploadImage:         cfg.UploadImage,
-		CredentialSecret:    cfg.CredentialSecret,
-		ObserveInterval:     cfg.ObserveInterval,
-		Recorder:            mgr.GetEventRecorderFor("backupconfig-controller"),
+		Recorder:                    mgr.GetEventRecorderFor("backupconfig-controller"),
 	}
 
 	// etcd artifact-observation follows the observe interval — setting it (>0)
