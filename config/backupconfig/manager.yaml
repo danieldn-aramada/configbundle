@@ -18,7 +18,7 @@ data:
   # Namespace where the S3 Sync CronJob is written.
   s3SyncNamespace: "default"
   # rclone image used by the S3 Sync CronJob.
-  s3SyncRcloneImage: "rclone/rclone:latest"
+  s3SyncRcloneImage: "armadaeksatest.azurecr.io/rclone:1.68"
   # K8s Secret holding S3 credentials (source-access-key, source-secret-key,
   # dest-access-key, dest-secret-key). Must exist in s3SyncNamespace.
   s3SyncCredSecret: "s3-creds"
