@@ -58,23 +58,6 @@ spec:
         s3Sync:
           orbId: "colo:cluster-001-s3sync"
           enabled: true
-
-kubectl --context colo-dev-main apply -f - <<'EOF'
-apiVersion: armada.ai/v1
-kind: ConfigBundle
-metadata:
-  name: colo-dev-main
-spec:
-  orbId: "colo:dev-main-bundle"
-  datacenter: colo
-  kubernetesClusters:
-    - orbId: "colo:dev-main"
-      name: dev-main
-      backup:
-        orbId: "colo:dev-main-backup"
-        etcd:
-          orbId: "colo:dev-main-etcd"
-          enabled: true
-          schedule: "0 16 * * *"
-          location: "https://stgalbackupsdevccwus01.blob.core.windows.net/etcd-demo/colo/dev-main"
-EOF
+          schedule: "0 4 * * *"
+          sourceLocation: "http://rook-ceph-rgw.rook-ceph.svc:80/mirror-bucket/prefix"
+          destLocation: "https://dest-endpoint/dest-bucket/prefix"  

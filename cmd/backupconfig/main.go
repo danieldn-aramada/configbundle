@@ -77,6 +77,17 @@ type Config struct {
 	// the AZURE_* creds mount.
 	ObserveInterval time.Duration `envconfig:"BACKUP_OBSERVE_INTERVAL" default:"0s"`
 
+	// S3SyncNamespace is where the controller writes the S3 Sync CronJob.
+	S3SyncNamespace string `envconfig:"S3SYNC_NAMESPACE" default:"default"`
+
+	// S3SyncRcloneImage is the container image that runs rclone sync.
+	S3SyncRcloneImage string `envconfig:"S3SYNC_RCLONE_IMAGE" default:"armadaeksatest.azurecr.io/rclone:1.68.2"`
+
+	// S3SyncCredSecret is the K8s Secret name (in S3SyncNamespace) holding
+	// S3 credentials. Data keys required: source-access-key, source-secret-key,
+	// dest-access-key, dest-secret-key.
+	S3SyncCredSecret string `envconfig:"S3SYNC_CRED_SECRET" default:"s3-creds"`
+
 	// EtcdSnapshotStaleAfter is the staleness threshold for the BackupsFresh
 	// condition — when the NEWEST snapshot is older than this, the condition
 	// flips to False (SnapshotStale). It is a health alarm only and never
@@ -157,7 +168,10 @@ func main() {
 		"etcd", cfg.EtcdBackupNamespace,
 		"etcdctlImage", cfg.EtcdctlImage,
 		"uploadImage", cfg.UploadImage,
-		"credentialSecret", cfg.CredentialSecret)
+		"credentialSecret", cfg.CredentialSecret,
+		"s3sync", cfg.S3SyncNamespace,
+		"s3syncRcloneImage", cfg.S3SyncRcloneImage,
+		"s3syncCredSecret", cfg.S3SyncCredSecret)
 
 	reconciler := &backupconfig.BackupConfigReconciler{
 		Client:              mgr.GetClient(),
@@ -170,6 +184,9 @@ func main() {
 		EtcdRetainPerDay:    cfg.RetainPerDay,
 		EtcdBackupTimeZone:  cfg.TimeZone,
 		ObserveInterval:     cfg.ObserveInterval,
+		S3SyncNamespace:     cfg.S3SyncNamespace,
+		S3SyncRcloneImage:   cfg.S3SyncRcloneImage,
+		S3SyncCredSecret:    cfg.S3SyncCredSecret,
 		Recorder:            mgr.GetEventRecorderFor("backupconfig-controller"),
 	}
 

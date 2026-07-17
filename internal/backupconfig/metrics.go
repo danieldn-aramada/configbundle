@@ -71,6 +71,11 @@ var (
 		Name: "configbundle_backup_etcd_cronjob_present",
 		Help: "1 when the live etcd CronJob for this BackupConfig exists on-cluster; 0 when spec.etcd is set but the live resource is missing.",
 	}, []string{"cluster", "orb_id"})
+
+	s3syncCronJobPresent = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "configbundle_backup_s3sync_cronjob_present",
+		Help: "1 when the live S3 Sync CronJob for this BackupConfig exists on-cluster; 0 when spec.s3Sync is set but the live resource is missing.",
+	}, []string{"cluster"})
 )
 
 // etcdArtifacts is the snapshot store the etcd artifact Collector renders each
@@ -80,7 +85,7 @@ var etcdArtifacts = newEtcdArtifactStore()
 func init() {
 	metrics.Registry.MustRegister(
 		backupConfigReconcileTimestamp, backupConfigReconcileErrors, backupConfigReconcileSuccess,
-		veleroSchedulePresent, etcdCronJobPresent,
+		veleroSchedulePresent, etcdCronJobPresent, s3syncCronJobPresent,
 		newEtcdArtifactCollector(etcdArtifacts),
 	)
 }
@@ -109,6 +114,15 @@ func recordPresence(cluster string, bc *armadav1.BackupConfig, live armadav1.Obs
 		}
 	} else {
 		etcdCronJobPresent.Delete(labels)
+	}
+	if bc.Spec.S3Sync != nil {
+		if live.S3Sync != nil {
+			s3syncCronJobPresent.With(labels).Set(1)
+		} else {
+			s3syncCronJobPresent.With(labels).Set(0)
+		}
+	} else {
+		s3syncCronJobPresent.Delete(labels)
 	}
 }
 

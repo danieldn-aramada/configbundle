@@ -232,6 +232,38 @@ func TestMapToSpec_PopulatesDatacenterOrbID(t *testing.T) {
 	}
 }
 
+func TestMapClusterBackup_S3SyncFieldsPopulated(t *testing.T) {
+	src := &ClusterBackupResult{
+		OrbID: "colo:cluster-001-backup",
+		S3Sync: &S3SyncResult{
+			OrbID:          "colo:cluster-001-s3sync",
+			Enabled:        true,
+			Schedule:       "0 4 * * *",
+			SourceLocation: "http://rook-rgw.rook-ceph.svc:80/mirror-bucket/prefix",
+			DestLocation:   "https://dest-endpoint/dest-bucket/prefix",
+		},
+	}
+	dst := mapClusterBackup(src)
+	if dst.S3Sync == nil {
+		t.Fatal("expected S3Sync to be non-nil")
+	}
+	if dst.S3Sync.OrbID != "colo:cluster-001-s3sync" {
+		t.Errorf("OrbID: got %q", dst.S3Sync.OrbID)
+	}
+	if !derefBool(dst.S3Sync.Enabled) {
+		t.Error("Enabled: want true")
+	}
+	if derefString(dst.S3Sync.Schedule) != "0 4 * * *" {
+		t.Errorf("Schedule: got %q", derefString(dst.S3Sync.Schedule))
+	}
+	if derefString(dst.S3Sync.SourceLocation) != "http://rook-rgw.rook-ceph.svc:80/mirror-bucket/prefix" {
+		t.Errorf("SourceLocation: got %q", derefString(dst.S3Sync.SourceLocation))
+	}
+	if derefString(dst.S3Sync.DestLocation) != "https://dest-endpoint/dest-bucket/prefix" {
+		t.Errorf("DestLocation: got %q", derefString(dst.S3Sync.DestLocation))
+	}
+}
+
 // derefString returns *p or "" if nil.
 func derefString(p *string) string {
 	if p == nil {

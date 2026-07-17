@@ -15,6 +15,13 @@ data:
   # Placeholder image for the etcd snapshot job. Swap to the real snapshot
   # image (or override via `kustomize edit set image`) once it ships.
   etcdBackupImage: "armadaeksatest.azurecr.io/etcd-snapshot:TBD"
+  # Namespace where the S3 Sync CronJob is written.
+  s3SyncNamespace: "default"
+  # rclone image used by the S3 Sync CronJob.
+  s3SyncRcloneImage: "rclone/rclone:latest"
+  # K8s Secret holding S3 credentials (source-access-key, source-secret-key,
+  # dest-access-key, dest-secret-key). Must exist in s3SyncNamespace.
+  s3SyncCredSecret: "s3-creds"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -68,6 +75,21 @@ spec:
             configMapKeyRef:
               name: backupconfig-controller-config
               key: etcdBackupImage
+        - name: S3SYNC_NAMESPACE
+          valueFrom:
+            configMapKeyRef:
+              name: backupconfig-controller-config
+              key: s3SyncNamespace
+        - name: S3SYNC_RCLONE_IMAGE
+          valueFrom:
+            configMapKeyRef:
+              name: backupconfig-controller-config
+              key: s3SyncRcloneImage
+        - name: S3SYNC_CRED_SECRET
+          valueFrom:
+            configMapKeyRef:
+              name: backupconfig-controller-config
+              key: s3SyncCredSecret
         # Drift-detection polling: re-reads live state every interval. Empty/unset =
         # disabled (event-driven only). K8s deploy enables it explicitly.
         - name: ETCD_BACKUP_RETAIN_PER_DAY
