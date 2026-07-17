@@ -86,6 +86,18 @@ type BackupConfigReconciler struct {
 	// controller only references it.
 	CredentialSecret string
 
+	// EtcdRetainPerDay is how many snapshots to keep per UTC day per cluster.
+	// The prune step in snapshotWriterScript deletes older snapshots beyond
+	// this count. Zero means no pruning.
+	EtcdRetainPerDay int
+
+	// EtcdBackupTimeZone is the IANA timezone for the etcd CronJob schedule
+	// (e.g. "America/Los_Angeles"). Empty string uses the cluster default (UTC).
+	EtcdBackupTimeZone string
+
+	// ObserveInterval is the cadence at which the reconciler re-polls Velero +
+	// CronJob state even when nothing on the CR has changed. Drives drift
+	// detection. Zero = no periodic poll (event-driven only).
 	// ObserveInterval is the periodic re-observe cadence (RequeueAfter). Config
 	// drift on the owned CronJob/Schedule is caught instantly by watches, so
 	// this interval mainly governs polling non-watchable state — chiefly the

@@ -55,6 +55,17 @@ type Config struct {
 	// client-id, client-secret, tenant-id.
 	CredentialSecret string `envconfig:"ETCD_BACKUP_CRED_SECRET" default:"az-storage-creds"`
 
+	// RetainPerDay is how many etcd snapshots to keep per UTC day.
+	RetainPerDay int `envconfig:"ETCD_BACKUP_RETAIN_PER_DAY" default:"5"`
+
+	// TimeZone is the IANA tz for the etcd CronJob schedule. Empty = UTC.
+	TimeZone string `envconfig:"ETCD_BACKUP_TIMEZONE" default:""`
+
+	// ObserveInterval is how often the controller re-polls Velero Schedule and
+	// the etcd CronJob for each CR independent of CR spec changes. Drives
+	// drift-detection metrics. Zero (the default, which keeps `go run` safe
+	// for local dev) = event-driven only, no periodic poll. Production deploys
+	// opt in via the K8s manifest — typical band is 1-5min.
 	// ObserveInterval is the single observe switch — the cadence at which bc
 	// re-observes non-watchable state, chiefly the etcd backup store (blob) for
 	// snapshot presence/freshness. Set it (>0) to turn artifact observation ON;
@@ -170,6 +181,8 @@ func main() {
 		EtcdctlImage:        cfg.EtcdctlImage,
 		UploadImage:         cfg.UploadImage,
 		CredentialSecret:    cfg.CredentialSecret,
+		EtcdRetainPerDay:    cfg.RetainPerDay,
+		EtcdBackupTimeZone:  cfg.TimeZone,
 		ObserveInterval:     cfg.ObserveInterval,
 		S3SyncNamespace:     cfg.S3SyncNamespace,
 		S3SyncRcloneImage:   cfg.S3SyncRcloneImage,

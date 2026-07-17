@@ -723,3 +723,43 @@ func TestObservedEqual_DetectsAnyFieldChange(t *testing.T) {
 		t.Errorf("expected identical observed to be equal")
 	}
 }
+
+func TestBuildEtcdCronJob_PruneAndConcurrency(t *testing.T) {
+	schedule := "*/15 * * * *"
+	enabled := true
+	p := etcdCronJobParams{
+		Name:             "colo-dev-main-backup-etcd",
+		Namespace:        "kube-system",
+		StorageAccount:   "stgalbackupsdevccwus01",
+		StorageContainer: "etcd",
+		BlobPrefix:       "colo/dev-main",
+		EtcdctlImage:     "etcdctl:3.5.15",
+		UploadImage:      "azure-cli:2.67.0",
+		CredentialSecret: "az-storage-creds",
+		RetainPerDay:     5,
+		TimeZone:         "America/Los_Angeles",
+		Block:            &armadav1.EtcdBackupSpec{Schedule: &schedule, Enabled: &enabled},
+	}
+	cj := buildEtcdCronJob(p)
+
+	if cj.Spec.ConcurrencyPolicy != batchv1.ForbidConcurrent {
+		t.Errorf("ConcurrencyPolicy = %q, want Forbid", cj.Spec.ConcurrencyPolicy)
+	}
+	if cj.Spec.TimeZone == nil || *cj.Spec.TimeZone != "America/Los_Angeles" {
+		t.Errorf("TimeZone = %v, want America/Los_Angeles", cj.Spec.TimeZone)
+	}
+	writer := cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0]
+	script := writer.Command[2]
+	if !strings.Contains(script, "storage blob delete") {
+		t.Error("writer script missing prune (blob delete) logic")
+	}
+	if !strings.Contains(script, "$BLOB_PREFIX") {
+		t.Error("prune must be scoped to $BLOB_PREFIX (this cluster's folder only)")
+	}
+	if strings.Contains(script, "houston-stage") || strings.Contains(script, "g2-w2") {
+		t.Error("script must not hardcode galleon/cluster names")
+	}
+	if got := envValue(writer.Env, "RETAIN_PER_DAY"); got != "5" {
+		t.Errorf("RETAIN_PER_DAY env = %q, want 5", got)
+	}
+}
