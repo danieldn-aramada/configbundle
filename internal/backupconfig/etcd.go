@@ -50,19 +50,57 @@ rm "$SNAPSHOT_PATH"
 `
 
 // snapshotWriterScript uploads the .tar.gz produced by snapshotTakerScript to
-// Azure Blob Storage. STORAGE_ACCOUNT, STORAGE_CONTAINER, BLOB_PREFIX come
-// from bc-controller parsing spec.etcd.location (Azure Blob HTTPS URL). The
-// final blob path is <container>/<prefix>/<snapshot> — prefix contains the
-// galleon/cluster segmentation orbital chose when authoring the URL.
-const snapshotWriterScript = `set -ex
+// Azure Blob, then prunes old snapshots keeping the newest RETAIN_PER_DAY per
+// UTC day. STORAGE_ACCOUNT, STORAGE_CONTAINER, BLOB_PREFIX come from
+// bc-controller parsing spec.etcd.location; RETAIN_PER_DAY comes from
+// controller config. The prune is scoped to "$BLOB_PREFIX/" so it can only
+// ever touch THIS cluster's folder.
+const snapshotWriterScript = `set -eu
 az login --service-principal --username "$AZURE_CLIENT_ID" --password "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID"
+
+PREFIX="$BLOB_PREFIX/"
+
+# --- 1. Upload the snapshot the init container produced ---
 SNAPSHOT_NAME=$(ls /tmp/etcd-backups | grep 'snapshot-.*\.tar\.gz' | tail -n 1)
+echo "Uploading ${PREFIX}${SNAPSHOT_NAME}"
 az storage blob upload \
   --account-name "$STORAGE_ACCOUNT" \
   --container "$STORAGE_CONTAINER" \
-  --name "$BLOB_PREFIX/$SNAPSHOT_NAME" \
-  --file "/tmp/etcd-backups/$SNAPSHOT_NAME" \
+  --name "${PREFIX}${SNAPSHOT_NAME}" \
+  --file "/tmp/etcd-backups/${SNAPSHOT_NAME}" \
   --auth-mode login
+
+# --- 2. Prune: keep newest RETAIN_PER_DAY per UTC day for this cluster ---
+# Isolated in a subshell with set +e so prune errors are logged but never fail
+# the job — the backup upload above already succeeded.
+KEEP_FROM=$((RETAIN_PER_DAY + 1))
+echo "=== Starting prune for $PREFIX (keeping newest $RETAIN_PER_DAY per day) ==="
+(
+  set +e
+  ALL=$(az storage blob list \
+    --account-name "$STORAGE_ACCOUNT" \
+    --container-name "$STORAGE_CONTAINER" \
+    --prefix "$PREFIX" \
+    --num-results "*" \
+    --auth-mode login \
+    --query "[].name" -o tsv)
+
+  DATES=$(echo "$ALL" | sed -n 's#.*snapshot-\([0-9-]*\)T.*#\1#p' | sort -u)
+
+  for DAY in $DATES; do
+    echo "--- Pruning day $DAY (keeping newest $RETAIN_PER_DAY) ---"
+    echo "$ALL" | grep "snapshot-${DAY}T" | sort -r | tail -n +$KEEP_FROM | while read -r BLOB; do
+      echo "Deleting $BLOB"
+      az storage blob delete \
+        --account-name "$STORAGE_ACCOUNT" \
+        --container-name "$STORAGE_CONTAINER" \
+        --name "$BLOB" \
+        --auth-mode login \
+        || echo "WARN: failed to delete $BLOB (continuing)"
+    done
+  done
+)
+echo "=== Prune finished ==="
 `
 
 // etcdCronJobName builds the deterministic CronJob name for a BackupConfig.
@@ -157,6 +195,8 @@ func (r *BackupConfigReconciler) reconcileEtcd(ctx context.Context, bc *armadav1
 		EtcdctlImage:     r.EtcdctlImage,
 		UploadImage:      r.UploadImage,
 		CredentialSecret: r.CredentialSecret,
+		RetainPerDay:     r.EtcdRetainPerDay,
+		TimeZone:         r.EtcdBackupTimeZone,
 		Block:            block,
 	}
 
@@ -203,6 +243,8 @@ type etcdCronJobParams struct {
 	EtcdctlImage     string
 	UploadImage      string
 	CredentialSecret string
+	RetainPerDay     int    // how many snapshots to keep per UTC day
+	TimeZone         string // IANA tz for the schedule ("" = cluster default/UTC)
 	Block            *armadav1.EtcdBackupSpec
 }
 
@@ -245,6 +287,7 @@ func buildEtcdCronJob(p etcdCronJobParams) *batchv1.CronJob {
 		{Name: "STORAGE_ACCOUNT", Value: p.StorageAccount},
 		{Name: "STORAGE_CONTAINER", Value: p.StorageContainer},
 		{Name: "BLOB_PREFIX", Value: p.BlobPrefix},
+		{Name: "RETAIN_PER_DAY", Value: fmt.Sprintf("%d", p.RetainPerDay)},
 	}
 
 	volumes := []corev1.Volume{
@@ -328,7 +371,7 @@ func buildEtcdCronJob(p etcdCronJobParams) *batchv1.CronJob {
 		},
 		Spec: batchv1.CronJobSpec{
 			Schedule:                   schedule,
-			ConcurrencyPolicy:          batchv1.AllowConcurrent,
+			ConcurrencyPolicy:          batchv1.ForbidConcurrent,
 			SuccessfulJobsHistoryLimit: ptr.To(int32(3)),
 			FailedJobsHistoryLimit:     ptr.To(int32(3)),
 			JobTemplate: batchv1.JobTemplateSpec{
@@ -337,6 +380,9 @@ func buildEtcdCronJob(p etcdCronJobParams) *batchv1.CronJob {
 				},
 			},
 		},
+	}
+	if p.TimeZone != "" {
+		cj.Spec.TimeZone = ptr.To(p.TimeZone)
 	}
 	if p.Block.Enabled != nil {
 		suspend := !*p.Block.Enabled

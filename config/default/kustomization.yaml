@@ -12,7 +12,7 @@ images:
   newTag: v0.0.2
 - name: backupconfig
   newName: armadaeksatest.azurecr.io/backupconfig-controller
-  newTag: v0.0.1
+  newTag: v0.0.2
 
 # Adds namespace to all resources.
 namespace: configbundle-system

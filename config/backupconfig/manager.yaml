@@ -68,6 +68,12 @@ spec:
             configMapKeyRef:
               name: backupconfig-controller-config
               key: etcdBackupImage
+        # Drift-detection polling: re-reads live state every interval. Empty/unset =
+        # disabled (event-driven only). K8s deploy enables it explicitly.
+        - name: ETCD_BACKUP_RETAIN_PER_DAY
+          value: "5"
+        - name: ETCD_BACKUP_TIMEZONE
+          value: "America/Los_Angeles"
         # Observe switch + cadence — ONE knob (mirrors serverconfig's
         # IDRAC_OBSERVE_INTERVAL; there is no separate on/off flag). Set it (>0)
         # to turn etcd artifact-observation ON: bc polls the backup store (Azure
@@ -116,3 +122,5 @@ spec:
             memory: 64Mi
       serviceAccountName: backupconfig-controller
       terminationGracePeriodSeconds: 10
+      imagePullSecrets:
+      - name: acr-pull
