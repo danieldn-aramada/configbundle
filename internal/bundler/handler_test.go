@@ -502,5 +502,91 @@ func TestBuildIgnored_IntentValuesStayInSpec(t *testing.T) {
 	}
 }
 
+// --- Unit tests for mapClusterBackup / childless ClusterBackup filtering ---
+
+func TestMapClusterBackup_ChildlessReturnsNil(t *testing.T) {
+	src := &ClusterBackupResult{OrbID: "colo:cluster-backup"}
+	// No Etcd, Velero, or S3Sync children.
+	if got := mapClusterBackup(src); got != nil {
+		t.Errorf("expected nil for childless ClusterBackup, got %+v", got)
+	}
+}
+
+func TestMapClusterBackup_WithEtcdReturnsNonNil(t *testing.T) {
+	src := &ClusterBackupResult{
+		OrbID: "colo:cluster-backup",
+		Etcd:  &EtcdBackupResult{OrbID: "colo:cluster-etcd", Enabled: true, Schedule: "0 3 * * *"},
+	}
+	got := mapClusterBackup(src)
+	if got == nil {
+		t.Fatal("expected non-nil for ClusterBackup with etcd child")
+	}
+	if got.Etcd == nil {
+		t.Error("expected Etcd to be populated")
+	}
+}
+
+func TestMapClusterBackup_WithVeleroReturnsNonNil(t *testing.T) {
+	src := &ClusterBackupResult{
+		OrbID:  "colo:cluster-backup",
+		Velero: &VeleroBackupResult{OrbID: "colo:cluster-velero", Enabled: true},
+	}
+	if got := mapClusterBackup(src); got == nil {
+		t.Error("expected non-nil for ClusterBackup with velero child")
+	}
+}
+
+func TestMapClusterBackup_WithS3SyncReturnsNonNil(t *testing.T) {
+	src := &ClusterBackupResult{
+		OrbID:  "colo:cluster-backup",
+		S3Sync: &S3SyncResult{OrbID: "colo:cluster-s3sync", Enabled: true},
+	}
+	if got := mapClusterBackup(src); got == nil {
+		t.Error("expected non-nil for ClusterBackup with s3sync child")
+	}
+}
+
+func TestMapToSpec_ChildlessClusterBackupProducesNilBackup(t *testing.T) {
+	dc := DataCenterResult{
+		Name:  "colo",
+		OrbID: "colo:colo-galleon",
+		KubernetesClusters: []KubernetesClusterResult{{
+			OrbID:  "colo:cluster-a",
+			Name:   "cluster-a",
+			Backup: &ClusterBackupResult{OrbID: "colo:cluster-a-backup"},
+			// No Etcd, Velero, S3Sync.
+		}},
+	}
+	spec := mapToSpec(dc)
+	if len(spec.KubernetesClusters) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(spec.KubernetesClusters))
+	}
+	if spec.KubernetesClusters[0].Backup != nil {
+		t.Errorf("expected nil Backup for childless ClusterBackup node, got %+v", spec.KubernetesClusters[0].Backup)
+	}
+}
+
+func TestMapToSpec_ClusterWithEtcdEmitsBackup(t *testing.T) {
+	dc := DataCenterResult{
+		Name:  "colo",
+		OrbID: "colo:colo-galleon",
+		KubernetesClusters: []KubernetesClusterResult{{
+			OrbID: "colo:cluster-b",
+			Name:  "cluster-b",
+			Backup: &ClusterBackupResult{
+				OrbID: "colo:cluster-b-backup",
+				Etcd:  &EtcdBackupResult{OrbID: "colo:cluster-b-etcd", Enabled: true, Schedule: "0 14 * * *"},
+			},
+		}},
+	}
+	spec := mapToSpec(dc)
+	if spec.KubernetesClusters[0].Backup == nil {
+		t.Fatal("expected non-nil Backup for cluster with etcd child")
+	}
+	if spec.KubernetesClusters[0].Backup.Etcd == nil {
+		t.Error("expected Etcd block in spec")
+	}
+}
+
 func ptrString(s string) *string { return &s }
 func ptrBool(b bool) *bool       { return &b }

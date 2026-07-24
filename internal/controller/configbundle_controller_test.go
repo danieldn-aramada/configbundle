@@ -986,6 +986,159 @@ var _ = Describe("Takeover", func() {
 	})
 })
 
+// ---------------------------------------------------------------------------
+// Prune tests
+// ---------------------------------------------------------------------------
+
+var _ = Describe("ConfigBundle Controller — orphan pruning", func() {
+	const (
+		timeout  = 10 * time.Second
+		interval = 250 * time.Millisecond
+	)
+
+	ctx := context.Background()
+
+	AfterEach(func() {
+		for _, list := range []client.ObjectList{
+			&armadav1.BackupConfigList{},
+			&armadav1.ServerConfigList{},
+			&armadav1.ConfigBundleList{},
+		} {
+			Expect(k8sClient.List(ctx, list)).To(Succeed())
+			switch l := list.(type) {
+			case *armadav1.BackupConfigList:
+				for i := range l.Items {
+					Expect(k8sClient.Delete(ctx, &l.Items[i])).To(Or(Succeed(), MatchError(ContainSubstring("not found"))))
+				}
+			case *armadav1.ServerConfigList:
+				for i := range l.Items {
+					Expect(k8sClient.Delete(ctx, &l.Items[i])).To(Or(Succeed(), MatchError(ContainSubstring("not found"))))
+				}
+			case *armadav1.ConfigBundleList:
+				for i := range l.Items {
+					Expect(k8sClient.Delete(ctx, &l.Items[i])).To(Or(Succeed(), MatchError(ContainSubstring("not found"))))
+				}
+			}
+		}
+	})
+
+	It("deletes a BackupConfig when its cluster backup is removed from the spec", func() {
+		cb := &armadav1.ConfigBundle{
+			ObjectMeta: metav1.ObjectMeta{Name: "prune-test"},
+			Spec: armadav1.ConfigBundleSpec{
+				OrbID:      "colo:prune-test",
+				Datacenter: "colo",
+				KubernetesClusters: []armadav1.KubernetesClusterSpec{{
+					OrbID: "colo:cluster-a",
+					Backup: &armadav1.ClusterBackupSpec{
+						OrbID: "colo:cluster-a-backup",
+						Etcd: &armadav1.EtcdBackupSpec{
+							OrbID:   "colo:cluster-a-etcd",
+							Enabled: ptr.To(true),
+						},
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cb)).To(Succeed())
+
+		bc := &armadav1.BackupConfig{}
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: "colo-cluster-a-backup"}, bc)
+		}, timeout, interval).Should(Succeed(), "BackupConfig must be created initially")
+
+		// Remove the backup block — simulates the cluster's ClusterBackup node being
+		// deleted from orbital and dropped from the next bundle.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "prune-test"}, cb)).To(Succeed())
+		cb.Spec.KubernetesClusters[0].Backup = nil
+		Expect(k8sClient.Update(ctx, cb)).To(Succeed())
+
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: "colo-cluster-a-backup"}, bc)
+		}, timeout, interval).Should(MatchError(ContainSubstring("not found")),
+			"BackupConfig must be deleted after backup block is removed from spec")
+	})
+
+	It("does not delete a BackupConfig owned by a different ConfigBundle", func() {
+		cbA := &armadav1.ConfigBundle{
+			ObjectMeta: metav1.ObjectMeta{Name: "prune-owner-a"},
+			Spec: armadav1.ConfigBundleSpec{
+				OrbID:      "colo:prune-owner-a",
+				Datacenter: "colo",
+				KubernetesClusters: []armadav1.KubernetesClusterSpec{{
+					OrbID: "colo:cluster-owned-a",
+					Backup: &armadav1.ClusterBackupSpec{
+						OrbID: "colo:cluster-owned-a-backup",
+						Etcd:  &armadav1.EtcdBackupSpec{OrbID: "colo:cluster-owned-a-etcd", Enabled: ptr.To(true)},
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cbA)).To(Succeed())
+
+		bc := &armadav1.BackupConfig{}
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: "colo-cluster-owned-a-backup"}, bc)
+		}, timeout, interval).Should(Succeed())
+
+		// A second ConfigBundle with no clusters reconciles. It must not prune cbA's BackupConfig.
+		cbB := &armadav1.ConfigBundle{
+			ObjectMeta: metav1.ObjectMeta{Name: "prune-owner-b"},
+			Spec: armadav1.ConfigBundleSpec{
+				OrbID:      "colo:prune-owner-b",
+				Datacenter: "colo",
+			},
+		}
+		Expect(k8sClient.Create(ctx, cbB)).To(Succeed())
+
+		// Give the reconciler time to run for cbB.
+		Eventually(func(g Gomega) {
+			var fresh armadav1.ConfigBundle
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "prune-owner-b"}, &fresh)).To(Succeed())
+			g.Expect(fresh.Status.ObservedGeneration).To(Equal(fresh.Generation))
+		}, timeout, interval).Should(Succeed())
+
+		// cbA's BackupConfig must still exist.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "colo-cluster-owned-a-backup"}, bc)).To(Succeed())
+	})
+
+	It("deletes a ServerConfig when its server is removed from the spec", func() {
+		cb := &armadav1.ConfigBundle{
+			ObjectMeta: metav1.ObjectMeta{Name: "prune-sc-test"},
+			Spec: armadav1.ConfigBundleSpec{
+				OrbID:      "colo:prune-sc-test",
+				Datacenter: "colo",
+				Servers: []armadav1.ServerSpec{
+					{OrbID: "colo:srv-aaa", ServiceTag: "AAA", Hostname: ptr.To("host-aaa"), OobIP: ptr.To("10.0.0.1")},
+					{OrbID: "colo:srv-bbb", ServiceTag: "BBB", Hostname: ptr.To("host-bbb"), OobIP: ptr.To("10.0.0.2")},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cb)).To(Succeed())
+
+		for _, name := range []string{"host-aaa", "host-bbb"} {
+			sc := &armadav1.ServerConfig{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: name}, sc)
+			}, timeout, interval).Should(Succeed(), "ServerConfig %s must be created initially", name)
+		}
+
+		// Drop host-bbb from the spec.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "prune-sc-test"}, cb)).To(Succeed())
+		cb.Spec.Servers = cb.Spec.Servers[:1]
+		Expect(k8sClient.Update(ctx, cb)).To(Succeed())
+
+		sc := &armadav1.ServerConfig{}
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: "host-bbb"}, sc)
+		}, timeout, interval).Should(MatchError(ContainSubstring("not found")),
+			"ServerConfig host-bbb must be deleted after server is removed from spec")
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "host-aaa"}, sc)).To(Succeed(),
+			"ServerConfig host-aaa must still exist")
+	})
+})
+
 // singleServerBundle returns a ConfigBundle with one server entry for use in tests.
 // Bundle orbId is derived from name; server orbId is derived from serviceTag.
 func singleServerBundle(name, hostname, serviceTag, oobIP string) *armadav1.ConfigBundle {
