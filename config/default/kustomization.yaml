@@ -6,13 +6,13 @@
 images:
 - name: controller
   newName: armadaeksatest.azurecr.io/configbundle-controller
-  newTag: v0.0.3
+  newTag: v0.0.4
 - name: serverconfig
   newName: armadaeksatest.azurecr.io/serverconfig-controller
   newTag: v0.0.2
 - name: backupconfig
   newName: armadaeksatest.azurecr.io/backupconfig-controller
-  newTag: v0.0.3
+  newTag: v0.0.4
 
 # Adds namespace to all resources.
 namespace: configbundle-system
