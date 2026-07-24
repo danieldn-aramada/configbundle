@@ -93,6 +93,11 @@ func (r *ConfigBundleReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	if err := r.pruneOrphanedChildren(ctx, &cb); err != nil {
+		log.Error(err, "failed to prune orphaned child CRs")
+		return ctrl.Result{}, err
+	}
+
 	if isSpecChange {
 		log.Info("applied child CRs",
 			"servers", len(cb.Spec.Servers),
@@ -121,6 +126,68 @@ func (r *ConfigBundleReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			"servers", len(cb.Spec.Servers), "clusters", len(cb.Spec.KubernetesClusters))
 	}
 	return ctrl.Result{}, nil
+}
+
+// pruneOrphanedChildren deletes BackupConfig and ServerConfig CRs that are owned
+// by this ConfigBundle but are no longer present in its spec. This is necessary
+// because SSA only applies what's in the incoming spec — it does not delete CRs
+// that dropped out of a previous bundle. OwnerReference GC only fires on owner
+// deletion; a spec change that removes a cluster entry leaves the child CR alive
+// without this explicit prune step.
+//
+// Safety: only CRs whose ownerReference points at this ConfigBundle (controller=true)
+// are candidates. User-created CRs with no ownerRef are never touched.
+func (r *ConfigBundleReconciler) pruneOrphanedChildren(ctx context.Context, cb *armadav1.ConfigBundle) error {
+	expectedBCs := map[string]bool{}
+	for _, cluster := range cb.Spec.KubernetesClusters {
+		if cluster.Backup != nil {
+			expectedBCs[orbIDToK8sName(cluster.Backup.OrbID)] = true
+		}
+	}
+	var bcList armadav1.BackupConfigList
+	if err := r.List(ctx, &bcList); err != nil {
+		return fmt.Errorf("list BackupConfigs: %w", err)
+	}
+	for i := range bcList.Items {
+		bc := &bcList.Items[i]
+		if expectedBCs[bc.Name] || !isOwnedBy(bc, cb) {
+			continue
+		}
+		if err := r.Delete(ctx, bc); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("delete stale BackupConfig %s: %w", bc.Name, err)
+		}
+	}
+
+	expectedSCs := map[string]bool{}
+	for _, server := range cb.Spec.Servers {
+		if server.Hostname != nil {
+			expectedSCs[strings.ToLower(*server.Hostname)] = true
+		}
+	}
+	var scList armadav1.ServerConfigList
+	if err := r.List(ctx, &scList); err != nil {
+		return fmt.Errorf("list ServerConfigs: %w", err)
+	}
+	for i := range scList.Items {
+		sc := &scList.Items[i]
+		if expectedSCs[sc.Name] || !isOwnedBy(sc, cb) {
+			continue
+		}
+		if err := r.Delete(ctx, sc); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("delete stale ServerConfig %s: %w", sc.Name, err)
+		}
+	}
+	return nil
+}
+
+// isOwnedBy reports whether obj carries a controller ownerReference pointing at owner.
+func isOwnedBy(obj client.Object, owner client.Object) bool {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.Controller != nil && *ref.Controller && ref.UID == owner.GetUID() {
+			return true
+		}
+	}
+	return false
 }
 
 // applyBackupConfig creates or updates a BackupConfig CR for the given cluster

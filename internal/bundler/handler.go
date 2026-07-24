@@ -276,6 +276,9 @@ func mapClusterBackup(src *ClusterBackupResult) *armadav1.ClusterBackupSpec {
 			Enabled: boolPtr(src.S3Sync.Enabled),
 		}
 	}
+	if dst.Etcd == nil && dst.Velero == nil && dst.S3Sync == nil {
+		return nil
+	}
 	return dst
 }
 
