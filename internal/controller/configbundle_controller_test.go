@@ -265,6 +265,7 @@ var _ = Describe("ConsumeServer", func() {
 		Expect(cb.Spec.Datacenter).To(Equal(datacenter))
 		Expect(cb.Spec.Servers).To(HaveLen(1))
 		Expect(cb.Spec.Servers[0].ServiceTag).To(Equal("3RK3V64"))
+		Expect(cb.Status.Phase).To(Equal(armadav1.ConfigBundlePhaseApplied))
 		Expect(cb.Status.LastAppliedDigest).To(Equal("sha256:abc123"))
 		Expect(cb.Status.LastOrbImportID).To(Equal("import-uuid-1"))
 		Expect(cb.Status.LastAppliedAt).NotTo(BeNil())
