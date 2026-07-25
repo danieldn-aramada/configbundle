@@ -150,6 +150,14 @@ func TestReconcile_SteadyStateQuiet_SkipsPOST(t *testing.T) {
 	if atomic.LoadInt32(hits) != 0 {
 		t.Errorf("expected 0 POSTs (steady-state quiet), got %d", atomic.LoadInt32(hits))
 	}
+
+	var fresh armadav1.ConfigBundle
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: cb.Name}, &fresh); err != nil {
+		t.Fatalf("get cb: %v", err)
+	}
+	if fresh.Status.DivergenceReporting == nil || fresh.Status.DivergenceReporting.LastCheckedForDivergence == nil {
+		t.Error("expected LastCheckedForDivergence to be set after steady-state-quiet reconcile")
+	}
 }
 
 func TestReconcile_SameHash_SkipsPOST(t *testing.T) {
@@ -174,6 +182,14 @@ func TestReconcile_SameHash_SkipsPOST(t *testing.T) {
 
 	if atomic.LoadInt32(hits) != 0 {
 		t.Errorf("expected 0 POSTs (hash matches prior), got %d", atomic.LoadInt32(hits))
+	}
+
+	var fresh armadav1.ConfigBundle
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: cb.Name}, &fresh); err != nil {
+		t.Fatalf("get cb: %v", err)
+	}
+	if fresh.Status.DivergenceReporting == nil || fresh.Status.DivergenceReporting.LastCheckedForDivergence == nil {
+		t.Error("expected LastCheckedForDivergence to be set after dedup-skip reconcile")
 	}
 }
 

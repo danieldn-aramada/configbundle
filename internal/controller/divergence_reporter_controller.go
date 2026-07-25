@@ -207,6 +207,9 @@ func (r *DivergenceReporter) Reconcile(ctx context.Context, req reconcile.Reques
 	// Exact-hash dedup: if we've already told orb this exact payload, skip.
 	if prior != nil && prior.LastPostedHash == h {
 		logger.V(1).Info("override set unchanged, skipping POST", "configbundle", req.Name)
+		if err := r.touchCheckedAt(ctx, req.Name); err != nil {
+			logger.Info("update lastCheckedForDivergence failed (will retry)", "configbundle", req.Name, "err", err.Error())
+		}
 		return reconcile.Result{}, nil
 	}
 
@@ -219,6 +222,10 @@ func (r *DivergenceReporter) Reconcile(ctx context.Context, req reconcile.Reques
 		if prior.LastPostedHash != h {
 			if err := r.writeReportingStatus(ctx, req.Name, h, 0); err != nil {
 				logger.Info("update reporting status failed (will retry)", "configbundle", req.Name, "err", err.Error())
+			}
+		} else {
+			if err := r.touchCheckedAt(ctx, req.Name); err != nil {
+				logger.Info("update lastCheckedForDivergence failed (will retry)", "configbundle", req.Name, "err", err.Error())
 			}
 		}
 		return reconcile.Result{}, nil
@@ -263,10 +270,29 @@ func (r *DivergenceReporter) writeReportingStatus(ctx context.Context, name, has
 			return client.IgnoreNotFound(err)
 		}
 		fresh.Status.DivergenceReporting = &armadav1.DivergenceReportingStatus{
-			LastPostedAt:            &now,
-			LastPostedHash:          hash,
-			LastPostedOverrideCount: &countCopy,
+			LastCheckedForDivergence: &now,
+			LastPostedAt:             &now,
+			LastPostedHash:           hash,
+			LastPostedOverrideCount:  &countCopy,
 		}
+		return r.Client.Status().Update(ctx, &fresh)
+	})
+}
+
+// touchCheckedAt updates only LastCheckedForDivergence without touching the
+// POST-related fields. Called on dedup early-return paths where the reporter
+// evaluated the override set but correctly skipped the POST.
+func (r *DivergenceReporter) touchCheckedAt(ctx context.Context, name string) error {
+	now := metav1.Now()
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var fresh armadav1.ConfigBundle
+		if err := r.Client.Get(ctx, types.NamespacedName{Name: name}, &fresh); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if fresh.Status.DivergenceReporting == nil {
+			fresh.Status.DivergenceReporting = &armadav1.DivergenceReportingStatus{}
+		}
+		fresh.Status.DivergenceReporting.LastCheckedForDivergence = &now
 		return r.Client.Status().Update(ctx, &fresh)
 	})
 }

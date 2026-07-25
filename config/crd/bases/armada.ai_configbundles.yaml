@@ -420,6 +420,16 @@ spec:
                   toward orb-sync-correctness over one avoidable POST). See
                   docs/reference/EDGE.md for the cold-start semantics.
                 properties:
+                  lastCheckedForDivergence:
+                    description: |-
+                      LastCheckedForDivergence is the timestamp of the most recent reconcile
+                      that evaluated the override set (whether or not a POST to orb followed).
+                      Distinct from LastPostedAt: the reporter skips the POST when the payload
+                      is unchanged (dedup) or the last POST was already empty (quiet-state).
+                      A recent LastCheckedForDivergence with a stale LastPostedAt means the
+                      reporter is healthy and the override set is steady — not that it is stuck.
+                    format: date-time
+                    type: string
                   lastPostedAt:
                     description: LastPostedAt is the timestamp of the last successful
                       POST to orb.

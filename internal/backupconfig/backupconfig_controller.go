@@ -116,6 +116,34 @@ type BackupConfigReconciler struct {
 	// dest-access-key, dest-secret-key.
 	S3SyncCredSecret string
 
+	// VeleroS3URL is the S3-compatible endpoint (RGW/MinIO) Velero's
+	// BackupStorageLocations point at. Infra-level, not part of BackupConfig
+	// intent.
+	VeleroS3URL string
+
+	// VeleroS3Region is the region value Velero's S3 client requires on the
+	// BSL config block. RGW/MinIO ignore the value but Velero requires it
+	// non-empty.
+	VeleroS3Region string
+
+	// VeleroS3ForcePathStyle controls whether the BSL uses path-style S3
+	// addressing (required for RGW/MinIO, not for real AWS S3).
+	VeleroS3ForcePathStyle bool
+
+	// VeleroAzureResourceGroup is the Azure resource group containing the
+	// storage account(s) referenced by Azure-backed BackupConfig locations.
+	// Only required when a BackupConfig's velero.location is an Azure Blob
+	// URL; empty is fine for S3-only fleets.
+	VeleroAzureResourceGroup string
+
+	// VeleroAzureSubscriptionID is the Azure subscription ID for the
+	// storage account(s) referenced by Azure-backed locations.
+	VeleroAzureSubscriptionID string
+
+	// VeleroAzureCredentialSecret is the K8s Secret name (in VeleroNamespace)
+	// holding the Velero Azure plugin's credentials file (single "cloud" key,
+	// AZURE_* env-style content). Distinct from CredentialSecret (etcd's).
+	VeleroAzureCredentialSecret string
 	// Recorder emits per-action Kubernetes Events (Velero Schedule PATCHed,
 	// etcd CronJob PATCHed, PATCH failed, etc.) so operators can see action
 	// history via `kubectl describe backupconfig <name>` alongside the

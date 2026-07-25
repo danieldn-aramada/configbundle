@@ -287,6 +287,15 @@ type ConfigBundleStatus struct {
 // pointer to 0) from "posted N overrides" — the exact distinction the
 // steady-state-quiet optimization needs to make correct decisions.
 type DivergenceReportingStatus struct {
+	// LastCheckedForDivergence is the timestamp of the most recent reconcile
+	// that evaluated the override set (whether or not a POST to orb followed).
+	// Distinct from LastPostedAt: the reporter skips the POST when the payload
+	// is unchanged (dedup) or the last POST was already empty (quiet-state).
+	// A recent LastCheckedForDivergence with a stale LastPostedAt means the
+	// reporter is healthy and the override set is steady — not that it is stuck.
+	// +optional
+	LastCheckedForDivergence *metav1.Time `json:"lastCheckedForDivergence,omitempty"`
+
 	// LastPostedAt is the timestamp of the last successful POST to orb.
 	// +optional
 	LastPostedAt *metav1.Time `json:"lastPostedAt,omitempty"`

@@ -384,6 +384,7 @@ func (s *ConsumeServer) applyManifest(ctx context.Context, body []byte, digest, 
 			return err
 		}
 		now := metav1.Now()
+		cur.Status.Phase = armadav1.ConfigBundlePhaseApplied
 		cur.Status.LastAppliedDigest = digest
 		cur.Status.LastOrbImportID = importID
 		cur.Status.LastAppliedAt = &now
