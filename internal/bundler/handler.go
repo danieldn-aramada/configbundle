@@ -272,8 +272,11 @@ func mapClusterBackup(src *ClusterBackupResult) *armadav1.ClusterBackupSpec {
 	}
 	if src.S3Sync != nil && src.S3Sync.OrbID != "" {
 		dst.S3Sync = &armadav1.S3SyncSpec{
-			OrbID:   src.S3Sync.OrbID,
-			Enabled: boolPtr(src.S3Sync.Enabled),
+			OrbID:          src.S3Sync.OrbID,
+			Enabled:        boolPtr(src.S3Sync.Enabled),
+			Schedule:       stringPtrNonEmpty(src.S3Sync.Schedule),
+			SourceLocation: stringPtrNonEmpty(src.S3Sync.SourceLocation),
+			DestLocation:   stringPtrNonEmpty(src.S3Sync.DestLocation),
 		}
 	}
 	if dst.Etcd == nil && dst.Velero == nil && dst.S3Sync == nil {

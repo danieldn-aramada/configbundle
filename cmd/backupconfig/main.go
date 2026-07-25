@@ -77,6 +77,17 @@ type Config struct {
 	// the AZURE_* creds mount.
 	ObserveInterval time.Duration `envconfig:"BACKUP_OBSERVE_INTERVAL" default:"0s"`
 
+	// S3SyncNamespace is where the controller writes the S3 Sync CronJob.
+	S3SyncNamespace string `envconfig:"S3SYNC_NAMESPACE" default:"default"`
+
+	// S3SyncRcloneImage is the container image that runs rclone sync.
+	S3SyncRcloneImage string `envconfig:"S3SYNC_RCLONE_IMAGE" default:"armadaeksatest.azurecr.io/rclone:1.68.2"`
+
+	// S3SyncCredSecret is the K8s Secret name (in S3SyncNamespace) holding
+	// S3 credentials. Data keys required: source-access-key, source-secret-key,
+	// dest-access-key, dest-secret-key.
+	S3SyncCredSecret string `envconfig:"S3SYNC_CRED_SECRET" default:"s3-creds"`
+
 	VeleroS3URL                 string `envconfig:"VELERO_S3_URL"`
 	VeleroS3Region              string `envconfig:"VELERO_S3_REGION" default:"default"`
 	VeleroS3ForcePathStyle      bool   `envconfig:"VELERO_S3_FORCE_PATH_STYLE" default:"true"`
@@ -164,12 +175,32 @@ func main() {
 		"etcdctlImage", cfg.EtcdctlImage,
 		"uploadImage", cfg.UploadImage,
 		"credentialSecret", cfg.CredentialSecret,
-		"veleroS3URL", cfg.VeleroS3URL,
+		"s3sync", cfg.S3SyncNamespace,
+		"s3syncRcloneImage", cfg.S3SyncRcloneImage,
+		"s3syncCredSecret", cfg.S3SyncCredSecret		
+    "veleroS3URL", cfg.VeleroS3URL,
 		"veleroS3Region", cfg.VeleroS3Region,
 		"veleroS3ForcePathStyle", cfg.VeleroS3ForcePathStyle,
 		"veleroAzureResourceGroup", cfg.VeleroAzureResourceGroup,
 		"veleroAzureSubscriptionID", cfg.VeleroAzureSubscriptionID,
 		"veleroAzureCredentialSecret", cfg.VeleroAzureCredentialSecret)
+
+	reconciler := &backupconfig.BackupConfigReconciler{
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		VeleroNamespace:     cfg.VeleroNamespace,
+		EtcdBackupNamespace: cfg.EtcdBackupNamespace,
+		EtcdctlImage:        cfg.EtcdctlImage,
+		UploadImage:         cfg.UploadImage,
+		CredentialSecret:    cfg.CredentialSecret,
+		EtcdRetainPerDay:    cfg.RetainPerDay,
+		EtcdBackupTimeZone:  cfg.TimeZone,
+		ObserveInterval:     cfg.ObserveInterval,
+		S3SyncNamespace:     cfg.S3SyncNamespace,
+		S3SyncRcloneImage:   cfg.S3SyncRcloneImage,
+		S3SyncCredSecret:    cfg.S3SyncCredSecret,
+		Recorder:            mgr.GetEventRecorderFor("backupconfig-controller"),
+
 
 	if cfg.ObserveInterval > 0 {
 		setupLog.Info("drift-detection polling enabled", "interval", cfg.ObserveInterval)

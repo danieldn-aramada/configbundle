@@ -152,6 +152,11 @@ spec:
                         s3Sync:
                           description: S3Sync holds desired S3-sync backup configuration.
                           properties:
+                            destLocation:
+                              description: |-
+                                DestLocation is the S3-compatible URL to sync to
+                                (e.g. "https://dest-endpoint/bucket/prefix").
+                              type: string
                             enabled:
                               description: Enabled toggles the S3-sync mechanism on
                                 or off.
@@ -160,6 +165,15 @@ spec:
                               description: |-
                                 OrbID is the immutable Orbital identifier for this S3Sync node
                                 (e.g. "colo:cluster-001-s3sync"). Set by the bundler; identity-only.
+                              type: string
+                            schedule:
+                              description: Schedule is a cron expression for when
+                                the sync runs (e.g. "0 4 * * *").
+                              type: string
+                            sourceLocation:
+                              description: |-
+                                SourceLocation is the S3-compatible URL to sync from
+                                (e.g. "http://rook-ceph-rgw.rook-ceph.svc:80/bucket/prefix").
                               type: string
                           required:
                           - orbId

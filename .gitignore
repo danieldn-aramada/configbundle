@@ -35,4 +35,5 @@ coverage.out
 *.docx
 *.xlsx
 *.pptx
+
 *:Zone.Identifier
