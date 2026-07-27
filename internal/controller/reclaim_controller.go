@@ -89,7 +89,7 @@ func (r *ReclaimController) Reconcile(ctx context.Context, req reconcile.Request
 		"configbundle", req.Name,
 		"digest", cb.Status.LastAppliedDigest)
 
-	if err := r.consume.applyManifest(ctx, body, cb.Status.LastAppliedDigest, cb.Status.LastOrbImportID); err != nil {
+	if err := r.consume.applyManifest(ctx, body, cb.Status.LastAppliedVersion, cb.Status.LastAppliedDigest, cb.Status.LastOrbImportID); err != nil {
 		return reconcile.Result{}, fmt.Errorf("replay manifest: %w", err)
 	}
 	return reconcile.Result{}, nil

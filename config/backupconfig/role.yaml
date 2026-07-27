@@ -38,6 +38,7 @@ rules:
   - velero.io
   resources:
   - schedules
+  - backupstoragelocations
   verbs:
   - get
   - list

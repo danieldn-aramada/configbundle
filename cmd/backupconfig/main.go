@@ -77,12 +77,13 @@ type Config struct {
 	// the AZURE_* creds mount.
 	ObserveInterval time.Duration `envconfig:"BACKUP_OBSERVE_INTERVAL" default:"0s"`
 
-	VeleroS3URL                 string `envconfig:"VELERO_S3_URL"`
-	VeleroS3Region              string `envconfig:"VELERO_S3_REGION" default:"default"`
-	VeleroS3ForcePathStyle      bool   `envconfig:"VELERO_S3_FORCE_PATH_STYLE" default:"true"`
+	VeleroS3URL            string `envconfig:"VELERO_S3_URL"`
+	VeleroS3Region         string `envconfig:"VELERO_S3_REGION" default:"default"`
+	VeleroS3ForcePathStyle bool   `envconfig:"VELERO_S3_FORCE_PATH_STYLE" default:"true"`
+	// Azure BSL config — set via overlay per cluster. Long-term these move to the Orbital schema.
 	VeleroAzureResourceGroup    string `envconfig:"VELERO_AZURE_RESOURCE_GROUP"`
 	VeleroAzureSubscriptionID   string `envconfig:"VELERO_AZURE_SUBSCRIPTION_ID"`
-	VeleroAzureCredentialSecret string `envconfig:"VELERO_AZURE_CRED_SECRET" default:"cloud-credentials-azure"`
+	VeleroAzureCredentialSecret string `envconfig:"VELERO_AZURE_CRED_SECRET" default:"cloud-credentials-v2"`
 	// EtcdSnapshotStaleAfter is the staleness threshold for the BackupsFresh
 	// condition — when the NEWEST snapshot is older than this, the condition
 	// flips to False (SnapshotStale). It is a health alarm only and never

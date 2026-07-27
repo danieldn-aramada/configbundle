@@ -254,6 +254,11 @@ type ConfigBundleStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
+	// LastAppliedVersion is the OCI tag (X-Orb-Tag) from the most recent
+	// successful consume dispatch, e.g. "v38".
+	// +optional
+	LastAppliedVersion string `json:"lastAppliedVersion,omitempty"`
+
 	// LastAppliedDigest is the artifact manifest digest (X-Orb-Digest) from the most
 	// recent successful consume dispatch.
 	// +optional

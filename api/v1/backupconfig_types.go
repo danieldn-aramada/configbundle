@@ -64,6 +64,11 @@ type VeleroBackupSpec struct {
 	// a Velero BackupStorageLocation name).
 	// +optional
 	Location *string `json:"location,omitempty"`
+
+	// RetentionDays is how long Velero keeps each backup. Translates to
+	// Schedule --ttl (retentionDays * 24h). Nil = defer to Velero's default (30d).
+	// +optional
+	RetentionDays *int `json:"retentionDays,omitempty"`
 }
 
 // EtcdBackupSpec mirrors orbital EtcdBackup — the etcd-snapshot mechanism.
@@ -85,6 +90,12 @@ type EtcdBackupSpec struct {
 	// Location is the storage location the backup writes to.
 	// +optional
 	Location *string `json:"location,omitempty"`
+
+	// RetentionDays is how long etcd snapshots are kept. When set, the upload
+	// script deletes snapshots older than this many days. Nil = use the
+	// controller's EtcdRetainPerDay count-based fallback.
+	// +optional
+	RetentionDays *int `json:"retentionDays,omitempty"`
 }
 
 // S3SyncSpec mirrors orbital S3Sync. Orbital exposes only `enabled` on this

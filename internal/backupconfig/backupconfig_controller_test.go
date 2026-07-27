@@ -559,11 +559,11 @@ func TestVeleroDeltas_NotFound(t *testing.T) {
 		Location: ptr.To("default"),
 		Enabled:  ptr.To(true),
 	}
-	d, err := veleroDeltas(context.Background(), c, r.VeleroNamespace, "missing-velero", block)
+	d, err := veleroDeltas(context.Background(), c, r.VeleroNamespace, "missing-velero", block, "colo:cluster-001")
 	if err != nil {
 		t.Fatalf("veleroDeltas: %v", err)
 	}
-	if d["schedule"] != "0 2 * * *" || d["storageLocation"] != "default" || d["paused"] != "false" {
+	if d["schedule"] != "0 2 * * *" || d["storageLocation"] != "default" || d["paused"] != "false" || d["label:cluster-orb-id"] != "colo-cluster-001" {
 		t.Errorf("expected all-fields delta when missing, got %+v", d)
 	}
 }

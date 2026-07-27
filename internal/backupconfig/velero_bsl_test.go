@@ -401,3 +401,131 @@ func TestReconcileBSL_CarriesOwnerReference(t *testing.T) {
 		t.Errorf("BSL missing BackupConfig OwnerReference; refs = %+v", live.GetOwnerReferences())
 	}
 }
+
+func TestReconcileVelero_SetsRetentionDaysTTL(t *testing.T) {
+	bc := sampleBackupConfig()
+	days := 7
+	bc.Spec.Velero.RetentionDays = &days
+	r, c := newReconciler(t, bc)
+
+	if _, err := r.reconcileVelero(context.Background(), bc); err != nil {
+		t.Fatalf("reconcileVelero: %v", err)
+	}
+
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(veleroScheduleGVK)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testVeleroNs, Name: veleroScheduleName(bc)}, live); err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	ttl, _, _ := unstructured.NestedString(live.Object, "spec", "template", "ttl")
+	if ttl != "168h0m0s" {
+		t.Errorf("ttl = %q, want 168h0m0s (7 days)", ttl)
+	}
+}
+
+func TestReconcileVelero_NilRetentionDays_NoTTL(t *testing.T) {
+	bc := sampleBackupConfig()
+	// RetentionDays deliberately not set.
+	r, c := newReconciler(t, bc)
+
+	if _, err := r.reconcileVelero(context.Background(), bc); err != nil {
+		t.Fatalf("reconcileVelero: %v", err)
+	}
+
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(veleroScheduleGVK)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testVeleroNs, Name: veleroScheduleName(bc)}, live); err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	if _, ok, _ := unstructured.NestedString(live.Object, "spec", "template", "ttl"); ok {
+		t.Error("expected ttl absent when retentionDays is nil")
+	}
+}
+
+func TestReconcileVelero_StampsClusterOrbIDLabel(t *testing.T) {
+	bc := sampleBackupConfig()
+	r, c := newReconciler(t, bc)
+
+	if _, err := r.reconcileVelero(context.Background(), bc); err != nil {
+		t.Fatalf("reconcileVelero: %v", err)
+	}
+
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(veleroScheduleGVK)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testVeleroNs, Name: veleroScheduleName(bc)}, live); err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	want := labelSafeOrbID(bc.Spec.ClusterOrbID)
+	if got := live.GetLabels()["armada.ai/cluster-orb-id"]; got != want {
+		t.Errorf("label armada.ai/cluster-orb-id = %q, want %q", got, want)
+	}
+}
+
+func TestVeleroDeltas_LabelDrift(t *testing.T) {
+	// Seed a Schedule that is missing the label.
+	sched := &unstructured.Unstructured{}
+	sched.SetGroupVersionKind(veleroScheduleGVK)
+	sched.SetNamespace(testVeleroNs)
+	sched.SetName("colo-cluster-001-velero")
+	_ = unstructured.SetNestedField(sched.Object, "0 2 * * *", "spec", "schedule")
+
+	_, c := newReconciler(t, sched)
+	block := &armadav1.VeleroBackupSpec{Schedule: ptr.To("0 2 * * *")}
+
+	d, err := veleroDeltas(context.Background(), c, testVeleroNs, "colo-cluster-001-velero", block, "colo:cluster-001")
+	if err != nil {
+		t.Fatalf("veleroDeltas: %v", err)
+	}
+	if d["label:cluster-orb-id"] != "colo-cluster-001" {
+		t.Errorf("expected label delta when label absent, got %+v", d)
+	}
+}
+
+func TestBuildEtcdCronJob_RetentionDaysEnvVar(t *testing.T) {
+	days := 14
+	p := etcdCronJobParams{
+		Name:             "test-etcd",
+		Namespace:        "kube-system",
+		StorageAccount:   "acct",
+		StorageContainer: "container",
+		BlobPrefix:       "prefix",
+		EtcdctlImage:     "etcdctl:latest",
+		UploadImage:      "azure-cli:latest",
+		CredentialSecret: "az-creds",
+		RetainPerDay:     5,
+		RetentionDays:    &days,
+		Block:            &armadav1.EtcdBackupSpec{OrbID: "colo:etcd"},
+	}
+	cj := buildEtcdCronJob(p)
+	writer := findContainer(cj.Spec.JobTemplate.Spec.Template.Spec.Containers, etcdSnapshotWriterContainerName)
+	if writer == nil {
+		t.Fatal("writer container not found")
+	}
+	if v := envValue(writer.Env, "RETENTION_DAYS"); v != "14" {
+		t.Errorf("RETENTION_DAYS = %q, want 14", v)
+	}
+}
+
+func TestBuildEtcdCronJob_NilRetentionDays_EmptyEnvVar(t *testing.T) {
+	p := etcdCronJobParams{
+		Name:             "test-etcd",
+		Namespace:        "kube-system",
+		StorageAccount:   "acct",
+		StorageContainer: "container",
+		BlobPrefix:       "prefix",
+		EtcdctlImage:     "etcdctl:latest",
+		UploadImage:      "azure-cli:latest",
+		CredentialSecret: "az-creds",
+		RetainPerDay:     5,
+		RetentionDays:    nil,
+		Block:            &armadav1.EtcdBackupSpec{OrbID: "colo:etcd"},
+	}
+	cj := buildEtcdCronJob(p)
+	writer := findContainer(cj.Spec.JobTemplate.Spec.Template.Spec.Containers, etcdSnapshotWriterContainerName)
+	if writer == nil {
+		t.Fatal("writer container not found")
+	}
+	if v := envValue(writer.Env, "RETENTION_DAYS"); v != "" {
+		t.Errorf("RETENTION_DAYS = %q, want empty string when nil", v)
+	}
+}

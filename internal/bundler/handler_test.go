@@ -483,7 +483,7 @@ func TestMapClusterBackup_ChildlessReturnsNil(t *testing.T) {
 func TestMapClusterBackup_WithEtcdReturnsNonNil(t *testing.T) {
 	src := &ClusterBackupResult{
 		OrbID: "colo:cluster-backup",
-		Etcd:  &EtcdBackupResult{OrbID: "colo:cluster-etcd", Enabled: true, Schedule: "0 3 * * *"},
+		Etcd:  &EtcdBackupResult{OrbID: "colo:cluster-etcd", Enabled: ptrBool(true), Schedule: ptrString("0 3 * * *")},
 	}
 	got := mapClusterBackup(src)
 	if got == nil {
@@ -497,7 +497,7 @@ func TestMapClusterBackup_WithEtcdReturnsNonNil(t *testing.T) {
 func TestMapClusterBackup_WithVeleroReturnsNonNil(t *testing.T) {
 	src := &ClusterBackupResult{
 		OrbID:  "colo:cluster-backup",
-		Velero: &VeleroBackupResult{OrbID: "colo:cluster-velero", Enabled: true},
+		Velero: &VeleroBackupResult{OrbID: "colo:cluster-velero", Enabled: ptrBool(true)},
 	}
 	if got := mapClusterBackup(src); got == nil {
 		t.Error("expected non-nil for ClusterBackup with velero child")
@@ -543,7 +543,7 @@ func TestMapToSpec_ClusterWithEtcdEmitsBackup(t *testing.T) {
 			Name:  "cluster-b",
 			Backup: &ClusterBackupResult{
 				OrbID: "colo:cluster-b-backup",
-				Etcd:  &EtcdBackupResult{OrbID: "colo:cluster-b-etcd", Enabled: true, Schedule: "0 14 * * *"},
+				Etcd:  &EtcdBackupResult{OrbID: "colo:cluster-b-etcd", Enabled: ptrBool(true), Schedule: ptrString("0 14 * * *")},
 			},
 		}},
 	}
@@ -553,6 +553,48 @@ func TestMapToSpec_ClusterWithEtcdEmitsBackup(t *testing.T) {
 	}
 	if spec.KubernetesClusters[0].Backup.Etcd == nil {
 		t.Error("expected Etcd block in spec")
+	}
+}
+
+func TestMapClusterBackup_RetentionDaysFlowsThrough(t *testing.T) {
+	days := 14
+	src := &ClusterBackupResult{
+		OrbID: "colo:cluster-backup",
+		Etcd: &EtcdBackupResult{
+			OrbID:         "colo:cluster-etcd",
+			Enabled:       ptrBool(true),
+			Schedule:      ptrString("0 3 * * *"),
+			RetentionDays: &days,
+		},
+		Velero: &VeleroBackupResult{
+			OrbID:         "colo:cluster-velero",
+			Enabled:       ptrBool(true),
+			RetentionDays: &days,
+		},
+	}
+	got := mapClusterBackup(src)
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if got.Etcd == nil || got.Etcd.RetentionDays == nil || *got.Etcd.RetentionDays != 14 {
+		t.Errorf("etcd retentionDays: got %v, want *14", got.Etcd.RetentionDays)
+	}
+	if got.Velero == nil || got.Velero.RetentionDays == nil || *got.Velero.RetentionDays != 14 {
+		t.Errorf("velero retentionDays: got %v, want *14", got.Velero.RetentionDays)
+	}
+}
+
+func TestMapClusterBackup_NilRetentionDaysProducesNilInSpec(t *testing.T) {
+	src := &ClusterBackupResult{
+		OrbID:  "colo:cluster-backup",
+		Velero: &VeleroBackupResult{OrbID: "colo:cluster-velero", Enabled: ptrBool(true)},
+	}
+	got := mapClusterBackup(src)
+	if got == nil || got.Velero == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if got.Velero.RetentionDays != nil {
+		t.Errorf("expected nil RetentionDays when not set, got %v", got.Velero.RetentionDays)
 	}
 }
 

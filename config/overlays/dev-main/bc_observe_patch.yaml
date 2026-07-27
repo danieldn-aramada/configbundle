@@ -6,6 +6,10 @@
 # ETCD_SNAPSHOT_STALE_AFTER is a STALENESS ALARM only — when the newest snapshot
 # is older than this, the BackupsFresh condition flips to False (SnapshotStale).
 # It does NOT delete anything; retention is not implemented.
+#
+# VELERO_AZURE_RESOURCE_GROUP / VELERO_AZURE_SUBSCRIPTION_ID: Azure infra
+# identifiers for BSL provisioning. Overlay-managed short-term; long-term these
+# move to the Orbital schema alongside velero.location.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +25,10 @@ spec:
           value: "30m"
         - name: ETCD_SNAPSHOT_STALE_AFTER
           value: "26h"
+        - name: VELERO_AZURE_RESOURCE_GROUP
+          value: "rg-galleon-backups-dev-cc-wus-01"
+        - name: VELERO_AZURE_SUBSCRIPTION_ID
+          value: "d7ed655f-2b86-4049-b485-35c2d70afc9d"
         - name: AZURE_TENANT_ID
           valueFrom:
             secretKeyRef:

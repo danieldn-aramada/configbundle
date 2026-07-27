@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -79,6 +80,9 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 	desired.SetGroupVersionKind(veleroScheduleGVK)
 	desired.SetNamespace(r.VeleroNamespace)
 	desired.SetName(name)
+	desired.SetLabels(map[string]string{
+		"armada.ai/cluster-orb-id": labelSafeOrbID(bc.Spec.ClusterOrbID),
+	})
 
 	specMap := map[string]any{}
 	if block.Schedule != nil {
@@ -89,10 +93,15 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 	if block.Enabled != nil {
 		specMap["paused"] = !*block.Enabled
 	}
+	templateMap := map[string]any{}
 	if block.Location != nil {
-		specMap["template"] = map[string]any{
-			"storageLocation": bslNameFromLocation(*block.Location),
-		}
+		templateMap["storageLocation"] = bslNameFromLocation(*block.Location)
+	}
+	if block.RetentionDays != nil {
+		templateMap["ttl"] = (time.Duration(*block.RetentionDays) * 24 * time.Hour).String()
+	}
+	if len(templateMap) > 0 {
+		specMap["template"] = templateMap
 	}
 	if err := unstructured.SetNestedMap(desired.Object, specMap, "spec"); err != nil {
 		return "", fmt.Errorf("build velero spec: %w", err)
@@ -114,7 +123,7 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 	// metadata bc-controller wants to backfill. Convention (cert-manager,
 	// cluster-api, kubebuilder samples): SSA is idempotent — always apply,
 	// let the API server do the work.
-	deltas, err := veleroDeltas(ctx, r.Client, r.VeleroNamespace, name, block)
+	deltas, err := veleroDeltas(ctx, r.Client, r.VeleroNamespace, name, block, bc.Spec.ClusterOrbID)
 	if err != nil {
 		return "", err
 	}
@@ -178,7 +187,7 @@ func observeVelero(ctx context.Context, c client.Client, namespace, name string)
 // deltas (we need to create the Schedule).
 //
 // Returns an empty map when intent and live agree — caller skips the PATCH.
-func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, block *armadav1.VeleroBackupSpec) (map[string]string, error) {
+func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, block *armadav1.VeleroBackupSpec, clusterOrbID string) (map[string]string, error) {
 	out := map[string]string{}
 
 	live := &unstructured.Unstructured{}
@@ -195,6 +204,10 @@ func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, 
 		if block.Enabled != nil {
 			out["paused"] = fmt.Sprintf("%t", !*block.Enabled)
 		}
+		if block.RetentionDays != nil {
+			out["ttl"] = (time.Duration(*block.RetentionDays) * 24 * time.Hour).String()
+		}
+		out["label:cluster-orb-id"] = labelSafeOrbID(clusterOrbID)
 		return out, nil
 	case err != nil:
 		return nil, fmt.Errorf("get velero schedule: %w", err)
@@ -220,5 +233,23 @@ func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, 
 			out["paused"] = fmt.Sprintf("%t", desiredPaused)
 		}
 	}
+	if block.RetentionDays != nil {
+		desiredTTL := (time.Duration(*block.RetentionDays) * 24 * time.Hour).String()
+		liveTTL, _, _ := unstructured.NestedString(live.Object, "spec", "template", "ttl")
+		if liveTTL != desiredTTL {
+			out["ttl"] = desiredTTL
+		}
+	}
+	if live.GetLabels()["armada.ai/cluster-orb-id"] != labelSafeOrbID(clusterOrbID) {
+		out["label:cluster-orb-id"] = labelSafeOrbID(clusterOrbID)
+	}
 	return out, nil
+}
+
+// labelSafeOrbID converts an orbId to a valid Kubernetes label value by
+// replacing colons with hyphens. OrbIds use ":" as a namespace separator
+// (e.g. "colo:dev-main") which is not valid in label values. Consumers
+// building label selectors must apply the same transformation.
+func labelSafeOrbID(orbID string) string {
+	return strings.ReplaceAll(orbID, ":", "-")
 }

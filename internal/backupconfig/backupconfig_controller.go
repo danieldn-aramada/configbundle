@@ -121,12 +121,12 @@ type BackupConfigReconciler struct {
 
 	// VeleroAzureResourceGroup is the Azure resource group containing the
 	// storage account(s) referenced by Azure-backed BackupConfig locations.
-	// Only required when a BackupConfig's velero.location is an Azure Blob
-	// URL; empty is fine for S3-only fleets.
+	// Set via overlay for now; long-term this moves to the Orbital schema.
 	VeleroAzureResourceGroup string
 
 	// VeleroAzureSubscriptionID is the Azure subscription ID for the
 	// storage account(s) referenced by Azure-backed locations.
+	// Set via overlay for now; long-term this moves to the Orbital schema.
 	VeleroAzureSubscriptionID string
 
 	// VeleroAzureCredentialSecret is the K8s Secret name (in VeleroNamespace)

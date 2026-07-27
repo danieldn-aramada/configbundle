@@ -249,52 +249,21 @@ func mapIdrac(src *IdracSettingsResult) armadav1.IdracSettingsSpec {
 }
 
 // mapClusterBackup translates the GraphQL ClusterBackupResult into a
-// ClusterBackupSpec. Null edges on the graph become nil pointer fields on
-// the spec — a cluster with only etcd configured produces
-// ClusterBackupSpec{OrbID: ..., Etcd: {...}} with Velero and S3Sync nil.
+// ClusterBackupSpec via JSON round-trip. Both types share identical JSON field
+// names by design (orbital schema alignment), so any field added to the result
+// struct flows automatically — no manual field wiring needed. Null edges on the
+// graph become nil pointer fields on the spec.
 func mapClusterBackup(src *ClusterBackupResult) *armadav1.ClusterBackupSpec {
-	dst := &armadav1.ClusterBackupSpec{OrbID: src.OrbID}
-	if src.Etcd != nil && src.Etcd.OrbID != "" {
-		dst.Etcd = &armadav1.EtcdBackupSpec{
-			OrbID:    src.Etcd.OrbID,
-			Enabled:  boolPtr(src.Etcd.Enabled),
-			Schedule: stringPtrNonEmpty(src.Etcd.Schedule),
-			Location: stringPtrNonEmpty(src.Etcd.Location),
-		}
+	b, err := json.Marshal(src)
+	if err != nil {
+		return nil
 	}
-	if src.Velero != nil && src.Velero.OrbID != "" {
-		dst.Velero = &armadav1.VeleroBackupSpec{
-			OrbID:    src.Velero.OrbID,
-			Enabled:  boolPtr(src.Velero.Enabled),
-			Schedule: stringPtrNonEmpty(src.Velero.Schedule),
-			Location: stringPtrNonEmpty(src.Velero.Location),
-		}
-	}
-	if src.S3Sync != nil && src.S3Sync.OrbID != "" {
-		dst.S3Sync = &armadav1.S3SyncSpec{
-			OrbID:   src.S3Sync.OrbID,
-			Enabled: boolPtr(src.S3Sync.Enabled),
-		}
+	var dst armadav1.ClusterBackupSpec
+	if err := json.Unmarshal(b, &dst); err != nil {
+		return nil
 	}
 	if dst.Etcd == nil && dst.Velero == nil && dst.S3Sync == nil {
 		return nil
 	}
-	return dst
-}
-
-// boolPtr returns a pointer to the given bool. Used to promote graph
-// primitive booleans (which are always present in the response) into the
-// pointer types the CRD uses to distinguish nil ("intent absent") from
-// false ("intent explicitly disabled"). Orbital doesn't distinguish today —
-// a boolean edge is always emitted — so this promotion is one-way.
-func boolPtr(b bool) *bool { return &b }
-
-// stringPtrNonEmpty returns nil for empty strings so absent-in-graph fields
-// don't populate spec with empty strings (which the CRD would treat as
-// "value is empty string", not "unset").
-func stringPtrNonEmpty(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
+	return &dst
 }

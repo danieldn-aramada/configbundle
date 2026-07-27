@@ -76,17 +76,19 @@ type ClusterBackupResult struct {
 // nodes with identical field names on both sides — matches the schema
 // alignment established 2026-07-06 (see feedback/orbital-schema-alignment).
 type EtcdBackupResult struct {
-	OrbID    string `json:"orbId"`
-	Enabled  bool   `json:"enabled"`
-	Schedule string `json:"schedule"`
-	Location string `json:"location"`
+	OrbID         string  `json:"orbId"`
+	Enabled       *bool   `json:"enabled"`
+	Schedule      *string `json:"schedule"`
+	Location      *string `json:"location"`
+	RetentionDays *int    `json:"retentionDays"`
 }
 
 type VeleroBackupResult struct {
-	OrbID    string `json:"orbId"`
-	Enabled  bool   `json:"enabled"`
-	Schedule string `json:"schedule"`
-	Location string `json:"location"`
+	OrbID         string  `json:"orbId"`
+	Enabled       *bool   `json:"enabled"`
+	Schedule      *string `json:"schedule"`
+	Location      *string `json:"location"`
+	RetentionDays *int    `json:"retentionDays"`
 }
 
 type S3SyncResult struct {
@@ -182,12 +184,14 @@ query ConfigBundleByOrbID($orbId: String!) {
           enabled
           schedule
           location
+          retentionDays
         }
         velero {
           orbId
           enabled
           schedule
           location
+          retentionDays
         }
         s3Sync {
           orbId

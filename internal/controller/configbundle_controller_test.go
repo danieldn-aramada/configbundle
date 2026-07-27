@@ -258,7 +258,7 @@ var _ = Describe("ConsumeServer", func() {
 			armadav1.ServerSpec{OrbID: "colo:srv-3rk3v64", ServiceTag: "3RK3V64", Hostname: ptr.To("colo-r740-01"), OobIP: ptr.To("10.10.1.45")},
 		)
 
-		Expect(server.applyManifest(ctx, body, "sha256:abc123", "import-uuid-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v1", "sha256:abc123", "import-uuid-1")).To(Succeed())
 
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
@@ -266,6 +266,7 @@ var _ = Describe("ConsumeServer", func() {
 		Expect(cb.Spec.Servers).To(HaveLen(1))
 		Expect(cb.Spec.Servers[0].ServiceTag).To(Equal("3RK3V64"))
 		Expect(cb.Status.Phase).To(Equal(armadav1.ConfigBundlePhaseApplied))
+		Expect(cb.Status.LastAppliedVersion).To(Equal("v1"))
 		Expect(cb.Status.LastAppliedDigest).To(Equal("sha256:abc123"))
 		Expect(cb.Status.LastOrbImportID).To(Equal("import-uuid-1"))
 		Expect(cb.Status.LastAppliedAt).NotTo(BeNil())
@@ -278,8 +279,8 @@ var _ = Describe("ConsumeServer", func() {
 		body := testManifest(datacenter,
 			armadav1.ServerSpec{OrbID: "colo:srv-3rk3v64", ServiceTag: "3RK3V64", Hostname: ptr.To("colo-r740-01"), OobIP: ptr.To("10.10.1.45")},
 		)
-		Expect(server.applyManifest(ctx, body, "sha256:abc", "import-1")).To(Succeed())
-		Expect(server.applyManifest(ctx, body, "sha256:abc", "import-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v1", "sha256:abc", "import-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v1", "sha256:abc", "import-1")).To(Succeed())
 
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
@@ -290,16 +291,17 @@ var _ = Describe("ConsumeServer", func() {
 		const datacenter = "colo"
 		Expect(server.applyManifest(ctx, testManifest(datacenter,
 			armadav1.ServerSpec{OrbID: "colo:srv-3rk3v64", ServiceTag: "3RK3V64", Hostname: ptr.To("r1"), OobIP: ptr.To("10.0.0.1")},
-		), "sha256:v1", "import-1")).To(Succeed())
+		), "v1", "sha256:v1", "import-1")).To(Succeed())
 
 		Expect(server.applyManifest(ctx, testManifest(datacenter,
 			armadav1.ServerSpec{OrbID: "colo:srv-3rk3v64", ServiceTag: "3RK3V64", Hostname: ptr.To("r1"), OobIP: ptr.To("10.0.0.1")},
 			armadav1.ServerSpec{OrbID: "colo:srv-fqk3v64", ServiceTag: "FQK3V64", Hostname: ptr.To("r2"), OobIP: ptr.To("10.0.0.2")},
-		), "sha256:v2", "import-2")).To(Succeed())
+		), "v2", "sha256:v2", "import-2")).To(Succeed())
 
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
 		Expect(cb.Spec.Servers).To(HaveLen(2))
+		Expect(cb.Status.LastAppliedVersion).To(Equal("v2"))
 		Expect(cb.Status.LastAppliedDigest).To(Equal("sha256:v2"))
 		Expect(cb.Status.LastOrbImportID).To(Equal("import-2"))
 	})
@@ -312,7 +314,7 @@ var _ = Describe("ConsumeServer", func() {
 			armadav1.ServerSpec{OrbID: "colo:srv-aaa0001", ServiceTag: "AAA0001", Hostname: ptr.To("colo-r740-01"), OobIP: ptr.To("10.10.1.45"),
 				IdracSettings: armadav1.IdracSettingsSpec{OrbID: "colo:srv-aaa0001-idrac", SSHEnabled: ptr.To(false), FirmwareVersion: ptr.To("7.0.0"), RacadmEnabled: ptr.To(false)}},
 		)
-		Expect(server.applyManifest(ctx, seed, "sha256:seed", "import-0")).To(Succeed())
+		Expect(server.applyManifest(ctx, seed, "v1", "sha256:seed", "import-0")).To(Succeed())
 
 		// Step 2: local:admin overrides ONE leaf — idrac.sshEnabled — on server A.
 		// Build the apply as unstructured so we claim ONLY the leaf we set; struct
@@ -343,7 +345,7 @@ var _ = Describe("ConsumeServer", func() {
 				IdracSettings: armadav1.IdracSettingsSpec{OrbID: "colo:srv-aaa0001-idrac", SSHEnabled: ptr.To(false), FirmwareVersion: ptr.To("7.20.10.05"), RacadmEnabled: ptr.To(true)}},
 			armadav1.ServerSpec{OrbID: "colo:srv-bbb0002", ServiceTag: "BBB0002", Hostname: ptr.To("colo-r740-02"), OobIP: ptr.To("10.10.1.46")},
 		)
-		Expect(server.applyManifest(ctx, body, "sha256:newdigest", "import-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v2", "sha256:newdigest", "import-1")).To(Succeed())
 
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
@@ -364,14 +366,14 @@ var _ = Describe("ConsumeServer", func() {
 	})
 
 	It("returns error when manifest has empty datacenter", func() {
-		err := server.applyManifest(ctx, []byte("datacenter: \"\"\n"), "sha256:x", "import-1")
+		err := server.applyManifest(ctx, []byte("datacenter: \"\"\n"), "v1", "sha256:x", "import-1")
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("empty datacenter"))
 	})
 
 	It("applies a manifest with no servers", func() {
 		const datacenter = "colo"
-		Expect(server.applyManifest(ctx, testManifest(datacenter), "sha256:empty", "import-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, testManifest(datacenter), "v1", "sha256:empty", "import-1")).To(Succeed())
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
 		Expect(cb.Spec.Servers).To(BeEmpty())
@@ -391,7 +393,7 @@ var _ = Describe("ConsumeServer", func() {
 		// Seed the CR so concurrent applies operate on an existing object.
 		// This also drives the reconciler so its ObservedGeneration write
 		// will race the subsequent applies.
-		Expect(server.applyManifest(ctx, body, "sha256:seed", "import-seed")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v1", "sha256:seed", "import-seed")).To(Succeed())
 
 		const goroutines = 2
 		var wg sync.WaitGroup
@@ -402,6 +404,7 @@ var _ = Describe("ConsumeServer", func() {
 				defer wg.Done()
 				errCh <- server.applyManifest(ctx,
 					body,
+					fmt.Sprintf("v%d", idx+2),
 					fmt.Sprintf("sha256:digest-%d", idx),
 					fmt.Sprintf("import-%d", idx),
 				)
