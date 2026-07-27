@@ -80,8 +80,8 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 	desired.SetGroupVersionKind(veleroScheduleGVK)
 	desired.SetNamespace(r.VeleroNamespace)
 	desired.SetName(name)
-	desired.SetLabels(map[string]string{
-		"armada.ai/cluster-orb-id": labelSafeOrbID(bc.Spec.ClusterOrbID),
+	desired.SetAnnotations(map[string]string{
+		"orbital.armada.ai/cluster-orb-id": bc.Spec.ClusterOrbID,
 	})
 
 	specMap := map[string]any{}
@@ -207,7 +207,7 @@ func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, 
 		if block.RetentionDays != nil {
 			out["ttl"] = (time.Duration(*block.RetentionDays) * 24 * time.Hour).String()
 		}
-		out["label:cluster-orb-id"] = labelSafeOrbID(clusterOrbID)
+		out["annotation:cluster-orb-id"] = clusterOrbID
 		return out, nil
 	case err != nil:
 		return nil, fmt.Errorf("get velero schedule: %w", err)
@@ -240,16 +240,8 @@ func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, 
 			out["ttl"] = desiredTTL
 		}
 	}
-	if live.GetLabels()["armada.ai/cluster-orb-id"] != labelSafeOrbID(clusterOrbID) {
-		out["label:cluster-orb-id"] = labelSafeOrbID(clusterOrbID)
+	if live.GetAnnotations()["orbital.armada.ai/cluster-orb-id"] != clusterOrbID {
+		out["annotation:cluster-orb-id"] = clusterOrbID
 	}
 	return out, nil
-}
-
-// labelSafeOrbID converts an orbId to a valid Kubernetes label value by
-// replacing colons with hyphens. OrbIds use ":" as a namespace separator
-// (e.g. "colo:dev-main") which is not valid in label values. Consumers
-// building label selectors must apply the same transformation.
-func labelSafeOrbID(orbID string) string {
-	return strings.ReplaceAll(orbID, ":", "-")
 }

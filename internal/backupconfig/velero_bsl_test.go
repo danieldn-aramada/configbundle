@@ -455,14 +455,13 @@ func TestReconcileVelero_StampsClusterOrbIDLabel(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testVeleroNs, Name: veleroScheduleName(bc)}, live); err != nil {
 		t.Fatalf("get schedule: %v", err)
 	}
-	want := labelSafeOrbID(bc.Spec.ClusterOrbID)
-	if got := live.GetLabels()["armada.ai/cluster-orb-id"]; got != want {
-		t.Errorf("label armada.ai/cluster-orb-id = %q, want %q", got, want)
+	if got := live.GetAnnotations()["orbital.armada.ai/cluster-orb-id"]; got != bc.Spec.ClusterOrbID {
+		t.Errorf("annotation orbital.armada.ai/cluster-orb-id = %q, want %q", got, bc.Spec.ClusterOrbID)
 	}
 }
 
-func TestVeleroDeltas_LabelDrift(t *testing.T) {
-	// Seed a Schedule that is missing the label.
+func TestVeleroDeltas_AnnotationDrift(t *testing.T) {
+	// Seed a Schedule that is missing the annotation.
 	sched := &unstructured.Unstructured{}
 	sched.SetGroupVersionKind(veleroScheduleGVK)
 	sched.SetNamespace(testVeleroNs)
@@ -476,8 +475,8 @@ func TestVeleroDeltas_LabelDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("veleroDeltas: %v", err)
 	}
-	if d["label:cluster-orb-id"] != "colo-cluster-001" {
-		t.Errorf("expected label delta when label absent, got %+v", d)
+	if d["annotation:cluster-orb-id"] != "colo:cluster-001" {
+		t.Errorf("expected annotation delta when annotation absent, got %+v", d)
 	}
 }
 

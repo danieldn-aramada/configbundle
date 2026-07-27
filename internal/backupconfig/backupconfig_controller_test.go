@@ -563,7 +563,7 @@ func TestVeleroDeltas_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("veleroDeltas: %v", err)
 	}
-	if d["schedule"] != "0 2 * * *" || d["storageLocation"] != "default" || d["paused"] != "false" || d["label:cluster-orb-id"] != "colo-cluster-001" {
+	if d["schedule"] != "0 2 * * *" || d["storageLocation"] != "default" || d["paused"] != "false" || d["annotation:cluster-orb-id"] != "colo:cluster-001" {
 		t.Errorf("expected all-fields delta when missing, got %+v", d)
 	}
 }
