@@ -54,7 +54,7 @@ type ConsumeServer struct {
 	inFlight   map[string]bool
 
 	// applyFn overrides applyManifest in tests.
-	applyFn func(ctx context.Context, body []byte, digest, importID string) error
+	applyFn func(ctx context.Context, body []byte, tag, digest, importID string) error
 }
 
 // IsInFlight reports whether applyManifest is currently executing for the
@@ -210,7 +210,7 @@ func (s *ConsumeServer) handleManifestBody(w http.ResponseWriter, r *http.Reques
 
 	// Apply asynchronously — K8s apply latency must not block orb's import pipeline.
 	go func() {
-		if err := apply(s.ctx, body, digest, importID); err != nil {
+		if err := apply(s.ctx, body, tag, digest, importID); err != nil {
 			logger.Error(err, "async apply failed", "importID", importID, "digest", digest)
 			return
 		}
@@ -235,7 +235,7 @@ func (s *ConsumeServer) handleConsume(w http.ResponseWriter, r *http.Request) {
 
 // applyManifest parses the manifest bytes, runs the admin-override-aware SSA pipeline,
 // and updates ConfigBundle status. Retries the SSA patch on transient K8s API errors.
-func (s *ConsumeServer) applyManifest(ctx context.Context, body []byte, digest, importID string) error {
+func (s *ConsumeServer) applyManifest(ctx context.Context, body []byte, tag, digest, importID string) error {
 	spec, err := parseManifest(body)
 	if err != nil {
 		return fmt.Errorf("parse manifest: %w", err)
@@ -384,6 +384,8 @@ func (s *ConsumeServer) applyManifest(ctx context.Context, body []byte, digest, 
 			return err
 		}
 		now := metav1.Now()
+		cur.Status.Phase = armadav1.ConfigBundlePhaseApplied
+		cur.Status.LastAppliedVersion = tag
 		cur.Status.LastAppliedDigest = digest
 		cur.Status.LastOrbImportID = importID
 		cur.Status.LastAppliedAt = &now

@@ -52,6 +52,7 @@ sequenceDiagram
 - **Stateless** — no database, no persistent state; all data fetched from Orbital GraphQL per request.
 - **Fail fast** — any error (GraphQL failure, timeout, bad datacenter) returns non-2xx immediately. Orbital treats non-2xx as a publish failure and retries per `ORBITAL_ENRICHER_MAX_ATTEMPTS`.
 - **Auth is caller's concern** — the bundler does not issue tokens; it optionally attaches `ORBITAL_BEARER_TOKEN` as a bearer token on GraphQL requests. Empty = no auth header.
+- **Do NOT add manual field wiring in `mapClusterBackup` for new Orbital fields.** The function uses a JSON round-trip (`json.Marshal` result → `json.Unmarshal` into spec). Both `ClusterBackupResult` and `ClusterBackupSpec` share identical JSON tags by orbital schema alignment, so new fields flow through automatically. Only touch `mapClusterBackup` if a result field needs a name or type transform before landing in the spec.
 
 ---
 

@@ -66,7 +66,7 @@ func TestHandleConsume_EmptyDatacenter(t *testing.T) {
 func TestHandleConsume_ApplyFnError(t *testing.T) {
 	s := NewConsumeServer(nil)
 	done := make(chan struct{})
-	s.applyFn = func(_ context.Context, _ []byte, _, _ string) error {
+	s.applyFn = func(_ context.Context, _ []byte, _, _, _ string) error {
 		defer close(done)
 		return fmt.Errorf("k8s unavailable")
 	}
@@ -84,10 +84,11 @@ func TestHandleConsume_ApplyFnError(t *testing.T) {
 func TestHandleConsume_Success(t *testing.T) {
 	s := NewConsumeServer(nil)
 	var gotBody []byte
-	var gotDigest, gotImportID string
+	var gotTag, gotDigest, gotImportID string
 	done := make(chan struct{})
-	s.applyFn = func(_ context.Context, body []byte, digest, importID string) error {
+	s.applyFn = func(_ context.Context, body []byte, tag, digest, importID string) error {
 		gotBody = body
+		gotTag = tag
 		gotDigest = digest
 		gotImportID = importID
 		close(done)
@@ -96,6 +97,7 @@ func TestHandleConsume_Success(t *testing.T) {
 	body := []byte("datacenter: colo")
 	req := httptest.NewRequest(http.MethodPost, "/consume", bytes.NewReader(body))
 	req.Header.Set("Content-Type", bundle.MediaTypeManifest)
+	req.Header.Set("X-Orb-Tag", "v38")
 	req.Header.Set("X-Orb-Digest", "sha256:abc")
 	req.Header.Set("X-Orb-Import-ID", "uuid-123")
 	w := httptest.NewRecorder()
@@ -106,6 +108,9 @@ func TestHandleConsume_Success(t *testing.T) {
 	<-done // wait for async apply
 	if string(gotBody) != string(body) {
 		t.Errorf("body mismatch: got %q", gotBody)
+	}
+	if gotTag != "v38" {
+		t.Errorf("tag mismatch: got %q", gotTag)
 	}
 	if gotDigest != "sha256:abc" {
 		t.Errorf("digest mismatch: got %q", gotDigest)
@@ -131,7 +136,7 @@ func TestHandleDispatch_UnsupportedMediaType(t *testing.T) {
 func TestHandleDispatch_ManifestRouted(t *testing.T) {
 	s := NewConsumeServer(nil)
 	done := make(chan struct{})
-	s.applyFn = func(_ context.Context, _ []byte, _, _ string) error {
+	s.applyFn = func(_ context.Context, _ []byte, _, _, _ string) error {
 		close(done)
 		return nil
 	}

@@ -209,9 +209,12 @@ signals + `velero_*` + KSM, not bc absorbing everyone's metrics.
   owner → bc owns observation (reads blob, emits metrics). Velero owns its own
   lifecycle → bc defers (reads `Backup` CRs, defers to `velero_*`).
 - **etcd: observe only for now.** Report freshness/count/size with blob
-  **read-only** creds. Retention (prune) is deferred — it needs write/delete
-  creds. Integrity verification is deferred and must NOT run in the reconcile
-  loop (do it at the job's write-time if at all).
+  **read-only** creds. Integrity verification is deferred and must NOT run in
+  the reconcile loop (do it at the job's write-time if at all).
+- **etcd retention via `RETENTION_DAYS` env var in the CronJob script.** Set →
+  age-based prune (delete blobs older than N days, using python3 for date math);
+  unset → count-based fallback via `RETAIN_PER_DAY`. No separate credential
+  grant needed — the CronJob already holds write creds for snapshot writes.
 - **Velero is not pure passthrough — bc owns intent→`Schedule` fidelity.** Only
   outcomes are deferred.
 - **Do NOT reach around Velero to its object storage.** Read a subsystem through

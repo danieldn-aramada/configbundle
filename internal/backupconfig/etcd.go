@@ -69,12 +69,8 @@ az storage blob upload \
   --file "/tmp/etcd-backups/${SNAPSHOT_NAME}" \
   --auth-mode login
 
-# --- 2. Per-day prune: keep newest RETAIN_PER_DAY per UTC day ---
-# Runs inline so each day's blob count stays bounded without waiting for the
-# nightly GC job. Failures are logged but never fail the job — the upload above
-# already succeeded.
-KEEP_FROM=$((RETAIN_PER_DAY + 1))
-echo "=== Per-day prune for $PREFIX (keeping newest $RETAIN_PER_DAY per day) ==="
+# --- 2. Prune ---
+# Isolated in a subshell so prune errors never fail the job (upload succeeded).
 (
   set +e
   ALL=$(az storage blob list \
@@ -85,20 +81,40 @@ echo "=== Per-day prune for $PREFIX (keeping newest $RETAIN_PER_DAY per day) ===
     --auth-mode login \
     --query "[].name" -o tsv)
 
-  DATES=$(echo "$ALL" | sed -n 's#.*snapshot-\([0-9-]*\)T.*#\1#p' | sort -u)
-
-  for DAY in $DATES; do
-    echo "--- Pruning day $DAY (keeping newest $RETAIN_PER_DAY) ---"
-    echo "$ALL" | grep "snapshot-${DAY}T" | sort -r | tail -n +$KEEP_FROM | while read -r BLOB; do
-      echo "Deleting $BLOB"
-      az storage blob delete \
-        --account-name "$STORAGE_ACCOUNT" \
-        --container-name "$STORAGE_CONTAINER" \
-        --name "$BLOB" \
-        --auth-mode login \
-        || echo "WARN: failed to delete $BLOB (continuing)"
+  if [ -n "$RETENTION_DAYS" ] && [ "$RETENTION_DAYS" -gt 0 ]; then
+    # Age-based: python3 is available in the azure-cli image.
+    CUTOFF=$(python3 -c "from datetime import date, timedelta; print((date.today() - timedelta(days=$RETENTION_DAYS)).strftime('%Y-%m-%d'))")
+    echo "=== Age-based prune for $PREFIX (deleting snapshots before $CUTOFF, retention=${RETENTION_DAYS}d) ==="
+    echo "$ALL" | grep "snapshot-" | while read -r BLOB; do
+      BLOB_DATE=$(echo "$BLOB" | sed -n 's#.*snapshot-\([0-9-]*\)T.*#\1#p')
+      if [ -n "$BLOB_DATE" ] && [ "$BLOB_DATE" \< "$CUTOFF" ]; then
+        echo "Deleting $BLOB (date $BLOB_DATE older than cutoff $CUTOFF)"
+        az storage blob delete \
+          --account-name "$STORAGE_ACCOUNT" \
+          --container-name "$STORAGE_CONTAINER" \
+          --name "$BLOB" \
+          --auth-mode login \
+          || echo "WARN: failed to delete $BLOB (continuing)"
+      fi
     done
-  done
+  else
+    # Count-based fallback: keep newest RETAIN_PER_DAY snapshots per UTC day.
+    KEEP_FROM=$((RETAIN_PER_DAY + 1))
+    echo "=== Count-based prune for $PREFIX (keeping newest $RETAIN_PER_DAY per day) ==="
+    DATES=$(echo "$ALL" | sed -n 's#.*snapshot-\([0-9-]*\)T.*#\1#p' | sort -u)
+    for DAY in $DATES; do
+      echo "--- Pruning day $DAY (keeping newest $RETAIN_PER_DAY) ---"
+      echo "$ALL" | grep "snapshot-${DAY}T" | sort -r | tail -n +$KEEP_FROM | while read -r BLOB; do
+        echo "Deleting $BLOB"
+        az storage blob delete \
+          --account-name "$STORAGE_ACCOUNT" \
+          --container-name "$STORAGE_CONTAINER" \
+          --name "$BLOB" \
+          --auth-mode login \
+          || echo "WARN: failed to delete $BLOB (continuing)"
+      done
+    done
+  fi
 )
 echo "=== Per-day prune finished ==="
 `
@@ -239,6 +255,7 @@ func (r *BackupConfigReconciler) reconcileEtcd(ctx context.Context, bc *armadav1
 		UploadImage:      r.UploadImage,
 		CredentialSecret: r.CredentialSecret,
 		RetainPerDay:     r.EtcdRetainPerDay,
+		RetentionDays:    block.RetentionDays,
 		TimeZone:         r.EtcdBackupTimeZone,
 		Block:            block,
 	}
@@ -317,7 +334,8 @@ type etcdCronJobParams struct {
 	EtcdctlImage     string
 	UploadImage      string
 	CredentialSecret string
-	RetainPerDay     int    // how many snapshots to keep per UTC day; per-day prune runs inline after upload
+	RetainPerDay     int    // how many snapshots to keep per UTC day (fallback when RetentionDays is nil)
+	RetentionDays    *int   // from spec.etcd.retentionDays; when set, overrides count-based prune with age-based
 	TimeZone         string // IANA tz for the schedule ("" = cluster default/UTC)
 	Block            *armadav1.EtcdBackupSpec
 }
@@ -362,6 +380,7 @@ func buildEtcdCronJob(p etcdCronJobParams) *batchv1.CronJob {
 		{Name: "STORAGE_CONTAINER", Value: p.StorageContainer},
 		{Name: "BLOB_PREFIX", Value: p.BlobPrefix},
 		{Name: "RETAIN_PER_DAY", Value: fmt.Sprintf("%d", p.RetainPerDay)},
+		{Name: "RETENTION_DAYS", Value: retentionDaysEnv(p.RetentionDays)},
 	}
 
 	volumes := []corev1.Volume{
@@ -558,6 +577,9 @@ func etcdDeltas(ctx context.Context, c client.Client, namespace, name string, bl
 	if envValue(liveWriter.Env, "BLOB_PREFIX") != params.BlobPrefix {
 		out["blobPrefix"] = params.BlobPrefix
 	}
+	if envValue(liveWriter.Env, "RETENTION_DAYS") != retentionDaysEnv(params.RetentionDays) {
+		out["retentionDays"] = retentionDaysEnv(params.RetentionDays)
+	}
 	return out, nil
 }
 
@@ -707,6 +729,14 @@ func etcdGCDeltas(ctx context.Context, c client.Client, namespace, name string, 
 		out["retainDays"] = retainDaysStr
 	}
 	return out, nil
+// retentionDaysEnv converts a nullable retentionDays pointer to the string
+// value for the RETENTION_DAYS env var. Nil maps to "" (unset), which tells
+// the prune script to fall back to count-based pruning.
+func retentionDaysEnv(days *int) string {
+	if days == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", *days)
 }
 
 func findContainer(cs []corev1.Container, name string) *corev1.Container {

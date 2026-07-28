@@ -3,6 +3,8 @@ package backupconfig
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -31,9 +33,23 @@ func veleroScheduleName(bc *armadav1.BackupConfig) string {
 	return bc.Name + "-velero"
 }
 
-// reconcileVelero applies the desired Velero Schedule spec from bc.Spec.Velero.
-// Returns a human-readable summary of the PATCH (empty string = no PATCH needed)
-// or an error if the apply failed.
+// bslNameFromLocation derives the Velero BackupStorageLocation name from an
+// Orbital location URL. Convention: the last path segment is the BSL name
+// (e.g. "s3://test-cluster-bucket/velero" -> "velero"; works the same for
+// https://<account>.blob.core.windows.net/... URLs — scheme-agnostic).
+func bslNameFromLocation(location string) string {
+	trimmed := strings.TrimRight(location, "/")
+	idx := strings.LastIndex(trimmed, "/")
+	if idx == -1 {
+		return trimmed
+	}
+	return trimmed[idx+1:]
+}
+
+// reconcileVelero applies the desired Velero Schedule spec from bc.Spec.Velero,
+// and, when a location is set, ensures the referenced BackupStorageLocation
+// exists first (create-and-own — see reconcileBSL). Returns a human-readable
+// summary of all PATCHes (empty string = no PATCH needed) or an error.
 //
 // "Enabled = false" maps to spec.paused = true on the Schedule (Velero's native
 // pause/resume toggle). The schedule resource keeps existing — we don't delete
@@ -43,10 +59,30 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 	block := bc.Spec.Velero
 	name := veleroScheduleName(bc)
 
+	patchMessages := []string{}
+
+	if block.Location != nil {
+		bslName := bslNameFromLocation(*block.Location)
+		desc, err := deriveStorage(*block.Location)
+		if err != nil {
+			return "", fmt.Errorf("derive storage descriptor: %w", err)
+		}
+		bslMsg, err := r.reconcileBSL(ctx, bc, bslName, desc)
+		if err != nil {
+			return "", fmt.Errorf("reconcile BSL: %w", err)
+		}
+		if bslMsg != "" {
+			patchMessages = append(patchMessages, bslMsg)
+		}
+	}
+
 	desired := &unstructured.Unstructured{}
 	desired.SetGroupVersionKind(veleroScheduleGVK)
 	desired.SetNamespace(r.VeleroNamespace)
 	desired.SetName(name)
+	desired.SetAnnotations(map[string]string{
+		"orbital.armada.ai/cluster-orb-id": bc.Spec.ClusterOrbID,
+	})
 
 	specMap := map[string]any{}
 	if block.Schedule != nil {
@@ -57,10 +93,15 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 	if block.Enabled != nil {
 		specMap["paused"] = !*block.Enabled
 	}
+	templateMap := map[string]any{}
 	if block.Location != nil {
-		specMap["template"] = map[string]any{
-			"storageLocation": *block.Location,
-		}
+		templateMap["storageLocation"] = bslNameFromLocation(*block.Location)
+	}
+	if block.RetentionDays != nil {
+		templateMap["ttl"] = (time.Duration(*block.RetentionDays) * 24 * time.Hour).String()
+	}
+	if len(templateMap) > 0 {
+		specMap["template"] = templateMap
 	}
 	if err := unstructured.SetNestedMap(desired.Object, specMap, "spec"); err != nil {
 		return "", fmt.Errorf("build velero spec: %w", err)
@@ -82,7 +123,7 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 	// metadata bc-controller wants to backfill. Convention (cert-manager,
 	// cluster-api, kubebuilder samples): SSA is idempotent — always apply,
 	// let the API server do the work.
-	deltas, err := veleroDeltas(ctx, r.Client, r.VeleroNamespace, name, block)
+	deltas, err := veleroDeltas(ctx, r.Client, r.VeleroNamespace, name, block, bc.Spec.ClusterOrbID)
 	if err != nil {
 		return "", err
 	}
@@ -94,11 +135,15 @@ func (r *BackupConfigReconciler) reconcileVelero(ctx context.Context, bc *armada
 		return "", fmt.Errorf("ssa patch velero schedule %s/%s: %w", r.VeleroNamespace, name, err)
 	}
 
-	if len(deltas) == 0 {
+	if len(deltas) > 0 {
+		patchMessages = append(patchMessages, formatBlockDeltas(fmt.Sprintf("velero/%s", name), deltas))
+	}
+
+	if len(patchMessages) == 0 {
 		logger.V(1).Info("velero schedule already matches intent (metadata reconciled)", "name", name)
 		return "", nil
 	}
-	return formatBlockDeltas(fmt.Sprintf("velero/%s", name), deltas), nil
+	return strings.Join(patchMessages, "; "), nil
 }
 
 // observeVelero reads the live Velero Schedule and projects the fields
@@ -142,7 +187,7 @@ func observeVelero(ctx context.Context, c client.Client, namespace, name string)
 // deltas (we need to create the Schedule).
 //
 // Returns an empty map when intent and live agree — caller skips the PATCH.
-func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, block *armadav1.VeleroBackupSpec) (map[string]string, error) {
+func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, block *armadav1.VeleroBackupSpec, clusterOrbID string) (map[string]string, error) {
 	out := map[string]string{}
 
 	live := &unstructured.Unstructured{}
@@ -154,11 +199,15 @@ func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, 
 			out["schedule"] = *block.Schedule
 		}
 		if block.Location != nil {
-			out["storageLocation"] = *block.Location
+			out["storageLocation"] = bslNameFromLocation(*block.Location)
 		}
 		if block.Enabled != nil {
 			out["paused"] = fmt.Sprintf("%t", !*block.Enabled)
 		}
+		if block.RetentionDays != nil {
+			out["ttl"] = (time.Duration(*block.RetentionDays) * 24 * time.Hour).String()
+		}
+		out["annotation:cluster-orb-id"] = clusterOrbID
 		return out, nil
 	case err != nil:
 		return nil, fmt.Errorf("get velero schedule: %w", err)
@@ -172,8 +221,9 @@ func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, 
 	}
 	if block.Location != nil {
 		liveLocation, _, _ := unstructured.NestedString(live.Object, "spec", "template", "storageLocation")
-		if liveLocation != *block.Location {
-			out["storageLocation"] = *block.Location
+		desired := bslNameFromLocation(*block.Location)
+		if liveLocation != desired {
+			out["storageLocation"] = desired
 		}
 	}
 	if block.Enabled != nil {
@@ -182,6 +232,16 @@ func veleroDeltas(ctx context.Context, c client.Client, namespace, name string, 
 		if livePaused != desiredPaused {
 			out["paused"] = fmt.Sprintf("%t", desiredPaused)
 		}
+	}
+	if block.RetentionDays != nil {
+		desiredTTL := (time.Duration(*block.RetentionDays) * 24 * time.Hour).String()
+		liveTTL, _, _ := unstructured.NestedString(live.Object, "spec", "template", "ttl")
+		if liveTTL != desiredTTL {
+			out["ttl"] = desiredTTL
+		}
+	}
+	if live.GetAnnotations()["orbital.armada.ai/cluster-orb-id"] != clusterOrbID {
+		out["annotation:cluster-orb-id"] = clusterOrbID
 	}
 	return out, nil
 }

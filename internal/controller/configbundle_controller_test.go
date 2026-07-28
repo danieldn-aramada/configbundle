@@ -258,13 +258,15 @@ var _ = Describe("ConsumeServer", func() {
 			armadav1.ServerSpec{OrbID: "colo:srv-3rk3v64", ServiceTag: "3RK3V64", Hostname: ptr.To("colo-r740-01"), OobIP: ptr.To("10.10.1.45")},
 		)
 
-		Expect(server.applyManifest(ctx, body, "sha256:abc123", "import-uuid-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v1", "sha256:abc123", "import-uuid-1")).To(Succeed())
 
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
 		Expect(cb.Spec.Datacenter).To(Equal(datacenter))
 		Expect(cb.Spec.Servers).To(HaveLen(1))
 		Expect(cb.Spec.Servers[0].ServiceTag).To(Equal("3RK3V64"))
+		Expect(cb.Status.Phase).To(Equal(armadav1.ConfigBundlePhaseApplied))
+		Expect(cb.Status.LastAppliedVersion).To(Equal("v1"))
 		Expect(cb.Status.LastAppliedDigest).To(Equal("sha256:abc123"))
 		Expect(cb.Status.LastOrbImportID).To(Equal("import-uuid-1"))
 		Expect(cb.Status.LastAppliedAt).NotTo(BeNil())
@@ -277,8 +279,8 @@ var _ = Describe("ConsumeServer", func() {
 		body := testManifest(datacenter,
 			armadav1.ServerSpec{OrbID: "colo:srv-3rk3v64", ServiceTag: "3RK3V64", Hostname: ptr.To("colo-r740-01"), OobIP: ptr.To("10.10.1.45")},
 		)
-		Expect(server.applyManifest(ctx, body, "sha256:abc", "import-1")).To(Succeed())
-		Expect(server.applyManifest(ctx, body, "sha256:abc", "import-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v1", "sha256:abc", "import-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v1", "sha256:abc", "import-1")).To(Succeed())
 
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
@@ -289,16 +291,17 @@ var _ = Describe("ConsumeServer", func() {
 		const datacenter = "colo"
 		Expect(server.applyManifest(ctx, testManifest(datacenter,
 			armadav1.ServerSpec{OrbID: "colo:srv-3rk3v64", ServiceTag: "3RK3V64", Hostname: ptr.To("r1"), OobIP: ptr.To("10.0.0.1")},
-		), "sha256:v1", "import-1")).To(Succeed())
+		), "v1", "sha256:v1", "import-1")).To(Succeed())
 
 		Expect(server.applyManifest(ctx, testManifest(datacenter,
 			armadav1.ServerSpec{OrbID: "colo:srv-3rk3v64", ServiceTag: "3RK3V64", Hostname: ptr.To("r1"), OobIP: ptr.To("10.0.0.1")},
 			armadav1.ServerSpec{OrbID: "colo:srv-fqk3v64", ServiceTag: "FQK3V64", Hostname: ptr.To("r2"), OobIP: ptr.To("10.0.0.2")},
-		), "sha256:v2", "import-2")).To(Succeed())
+		), "v2", "sha256:v2", "import-2")).To(Succeed())
 
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
 		Expect(cb.Spec.Servers).To(HaveLen(2))
+		Expect(cb.Status.LastAppliedVersion).To(Equal("v2"))
 		Expect(cb.Status.LastAppliedDigest).To(Equal("sha256:v2"))
 		Expect(cb.Status.LastOrbImportID).To(Equal("import-2"))
 	})
@@ -311,7 +314,7 @@ var _ = Describe("ConsumeServer", func() {
 			armadav1.ServerSpec{OrbID: "colo:srv-aaa0001", ServiceTag: "AAA0001", Hostname: ptr.To("colo-r740-01"), OobIP: ptr.To("10.10.1.45"),
 				IdracSettings: armadav1.IdracSettingsSpec{OrbID: "colo:srv-aaa0001-idrac", SSHEnabled: ptr.To(false), FirmwareVersion: ptr.To("7.0.0"), RacadmEnabled: ptr.To(false)}},
 		)
-		Expect(server.applyManifest(ctx, seed, "sha256:seed", "import-0")).To(Succeed())
+		Expect(server.applyManifest(ctx, seed, "v1", "sha256:seed", "import-0")).To(Succeed())
 
 		// Step 2: local:admin overrides ONE leaf — idrac.sshEnabled — on server A.
 		// Build the apply as unstructured so we claim ONLY the leaf we set; struct
@@ -342,7 +345,7 @@ var _ = Describe("ConsumeServer", func() {
 				IdracSettings: armadav1.IdracSettingsSpec{OrbID: "colo:srv-aaa0001-idrac", SSHEnabled: ptr.To(false), FirmwareVersion: ptr.To("7.20.10.05"), RacadmEnabled: ptr.To(true)}},
 			armadav1.ServerSpec{OrbID: "colo:srv-bbb0002", ServiceTag: "BBB0002", Hostname: ptr.To("colo-r740-02"), OobIP: ptr.To("10.10.1.46")},
 		)
-		Expect(server.applyManifest(ctx, body, "sha256:newdigest", "import-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v2", "sha256:newdigest", "import-1")).To(Succeed())
 
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
@@ -363,14 +366,14 @@ var _ = Describe("ConsumeServer", func() {
 	})
 
 	It("returns error when manifest has empty datacenter", func() {
-		err := server.applyManifest(ctx, []byte("datacenter: \"\"\n"), "sha256:x", "import-1")
+		err := server.applyManifest(ctx, []byte("datacenter: \"\"\n"), "v1", "sha256:x", "import-1")
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("empty datacenter"))
 	})
 
 	It("applies a manifest with no servers", func() {
 		const datacenter = "colo"
-		Expect(server.applyManifest(ctx, testManifest(datacenter), "sha256:empty", "import-1")).To(Succeed())
+		Expect(server.applyManifest(ctx, testManifest(datacenter), "v1", "sha256:empty", "import-1")).To(Succeed())
 		var cb armadav1.ConfigBundle
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: datacenter}, &cb)).To(Succeed())
 		Expect(cb.Spec.Servers).To(BeEmpty())
@@ -390,7 +393,7 @@ var _ = Describe("ConsumeServer", func() {
 		// Seed the CR so concurrent applies operate on an existing object.
 		// This also drives the reconciler so its ObservedGeneration write
 		// will race the subsequent applies.
-		Expect(server.applyManifest(ctx, body, "sha256:seed", "import-seed")).To(Succeed())
+		Expect(server.applyManifest(ctx, body, "v1", "sha256:seed", "import-seed")).To(Succeed())
 
 		const goroutines = 2
 		var wg sync.WaitGroup
@@ -401,6 +404,7 @@ var _ = Describe("ConsumeServer", func() {
 				defer wg.Done()
 				errCh <- server.applyManifest(ctx,
 					body,
+					fmt.Sprintf("v%d", idx+2),
 					fmt.Sprintf("sha256:digest-%d", idx),
 					fmt.Sprintf("import-%d", idx),
 				)
@@ -983,6 +987,159 @@ var _ = Describe("Takeover", func() {
 		err := server.processTakeover(ctx, spec, patchSpec)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("takeover entries failed"))
+	})
+})
+
+// ---------------------------------------------------------------------------
+// Prune tests
+// ---------------------------------------------------------------------------
+
+var _ = Describe("ConfigBundle Controller — orphan pruning", func() {
+	const (
+		timeout  = 10 * time.Second
+		interval = 250 * time.Millisecond
+	)
+
+	ctx := context.Background()
+
+	AfterEach(func() {
+		for _, list := range []client.ObjectList{
+			&armadav1.BackupConfigList{},
+			&armadav1.ServerConfigList{},
+			&armadav1.ConfigBundleList{},
+		} {
+			Expect(k8sClient.List(ctx, list)).To(Succeed())
+			switch l := list.(type) {
+			case *armadav1.BackupConfigList:
+				for i := range l.Items {
+					Expect(k8sClient.Delete(ctx, &l.Items[i])).To(Or(Succeed(), MatchError(ContainSubstring("not found"))))
+				}
+			case *armadav1.ServerConfigList:
+				for i := range l.Items {
+					Expect(k8sClient.Delete(ctx, &l.Items[i])).To(Or(Succeed(), MatchError(ContainSubstring("not found"))))
+				}
+			case *armadav1.ConfigBundleList:
+				for i := range l.Items {
+					Expect(k8sClient.Delete(ctx, &l.Items[i])).To(Or(Succeed(), MatchError(ContainSubstring("not found"))))
+				}
+			}
+		}
+	})
+
+	It("deletes a BackupConfig when its cluster backup is removed from the spec", func() {
+		cb := &armadav1.ConfigBundle{
+			ObjectMeta: metav1.ObjectMeta{Name: "prune-test"},
+			Spec: armadav1.ConfigBundleSpec{
+				OrbID:      "colo:prune-test",
+				Datacenter: "colo",
+				KubernetesClusters: []armadav1.KubernetesClusterSpec{{
+					OrbID: "colo:cluster-a",
+					Backup: &armadav1.ClusterBackupSpec{
+						OrbID: "colo:cluster-a-backup",
+						Etcd: &armadav1.EtcdBackupSpec{
+							OrbID:   "colo:cluster-a-etcd",
+							Enabled: ptr.To(true),
+						},
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cb)).To(Succeed())
+
+		bc := &armadav1.BackupConfig{}
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: "colo-cluster-a-backup"}, bc)
+		}, timeout, interval).Should(Succeed(), "BackupConfig must be created initially")
+
+		// Remove the backup block — simulates the cluster's ClusterBackup node being
+		// deleted from orbital and dropped from the next bundle.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "prune-test"}, cb)).To(Succeed())
+		cb.Spec.KubernetesClusters[0].Backup = nil
+		Expect(k8sClient.Update(ctx, cb)).To(Succeed())
+
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: "colo-cluster-a-backup"}, bc)
+		}, timeout, interval).Should(MatchError(ContainSubstring("not found")),
+			"BackupConfig must be deleted after backup block is removed from spec")
+	})
+
+	It("does not delete a BackupConfig owned by a different ConfigBundle", func() {
+		cbA := &armadav1.ConfigBundle{
+			ObjectMeta: metav1.ObjectMeta{Name: "prune-owner-a"},
+			Spec: armadav1.ConfigBundleSpec{
+				OrbID:      "colo:prune-owner-a",
+				Datacenter: "colo",
+				KubernetesClusters: []armadav1.KubernetesClusterSpec{{
+					OrbID: "colo:cluster-owned-a",
+					Backup: &armadav1.ClusterBackupSpec{
+						OrbID: "colo:cluster-owned-a-backup",
+						Etcd:  &armadav1.EtcdBackupSpec{OrbID: "colo:cluster-owned-a-etcd", Enabled: ptr.To(true)},
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cbA)).To(Succeed())
+
+		bc := &armadav1.BackupConfig{}
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: "colo-cluster-owned-a-backup"}, bc)
+		}, timeout, interval).Should(Succeed())
+
+		// A second ConfigBundle with no clusters reconciles. It must not prune cbA's BackupConfig.
+		cbB := &armadav1.ConfigBundle{
+			ObjectMeta: metav1.ObjectMeta{Name: "prune-owner-b"},
+			Spec: armadav1.ConfigBundleSpec{
+				OrbID:      "colo:prune-owner-b",
+				Datacenter: "colo",
+			},
+		}
+		Expect(k8sClient.Create(ctx, cbB)).To(Succeed())
+
+		// Give the reconciler time to run for cbB.
+		Eventually(func(g Gomega) {
+			var fresh armadav1.ConfigBundle
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "prune-owner-b"}, &fresh)).To(Succeed())
+			g.Expect(fresh.Status.ObservedGeneration).To(Equal(fresh.Generation))
+		}, timeout, interval).Should(Succeed())
+
+		// cbA's BackupConfig must still exist.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "colo-cluster-owned-a-backup"}, bc)).To(Succeed())
+	})
+
+	It("deletes a ServerConfig when its server is removed from the spec", func() {
+		cb := &armadav1.ConfigBundle{
+			ObjectMeta: metav1.ObjectMeta{Name: "prune-sc-test"},
+			Spec: armadav1.ConfigBundleSpec{
+				OrbID:      "colo:prune-sc-test",
+				Datacenter: "colo",
+				Servers: []armadav1.ServerSpec{
+					{OrbID: "colo:srv-aaa", ServiceTag: "AAA", Hostname: ptr.To("host-aaa"), OobIP: ptr.To("10.0.0.1")},
+					{OrbID: "colo:srv-bbb", ServiceTag: "BBB", Hostname: ptr.To("host-bbb"), OobIP: ptr.To("10.0.0.2")},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cb)).To(Succeed())
+
+		for _, name := range []string{"host-aaa", "host-bbb"} {
+			sc := &armadav1.ServerConfig{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: name}, sc)
+			}, timeout, interval).Should(Succeed(), "ServerConfig %s must be created initially", name)
+		}
+
+		// Drop host-bbb from the spec.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "prune-sc-test"}, cb)).To(Succeed())
+		cb.Spec.Servers = cb.Spec.Servers[:1]
+		Expect(k8sClient.Update(ctx, cb)).To(Succeed())
+
+		sc := &armadav1.ServerConfig{}
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: "host-bbb"}, sc)
+		}, timeout, interval).Should(MatchError(ContainSubstring("not found")),
+			"ServerConfig host-bbb must be deleted after server is removed from spec")
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "host-aaa"}, sc)).To(Succeed(),
+			"ServerConfig host-aaa must still exist")
 	})
 })
 

@@ -137,6 +137,12 @@ spec:
                                 OrbID is the immutable Orbital identifier for this EtcdBackup node
                                 (e.g. "colo:cluster-001-etcd"). Set by the bundler; identity-only.
                               type: string
+                            retentionDays:
+                              description: |-
+                                RetentionDays is how long etcd snapshots are kept. When set, the upload
+                                script deletes snapshots older than this many days. Nil = use the
+                                controller's EtcdRetainPerDay count-based fallback.
+                              type: integer
                             schedule:
                               description: Schedule is a cron expression for when
                                 the backup runs (e.g. "0 3 * * *").
@@ -181,6 +187,11 @@ spec:
                                 OrbID is the immutable Orbital identifier for this VeleroBackup node
                                 (e.g. "colo:cluster-001-velero"). Set by the bundler; identity-only.
                               type: string
+                            retentionDays:
+                              description: |-
+                                RetentionDays is how long Velero keeps each backup. Translates to
+                                Schedule --ttl (retentionDays * 24h). Nil = defer to Velero's default (30d).
+                              type: integer
                             schedule:
                               description: Schedule is a cron expression for when
                                 the backup runs (e.g. "0 2 * * *").
@@ -406,6 +417,16 @@ spec:
                   toward orb-sync-correctness over one avoidable POST). See
                   docs/reference/EDGE.md for the cold-start semantics.
                 properties:
+                  lastCheckedForDivergence:
+                    description: |-
+                      LastCheckedForDivergence is the timestamp of the most recent reconcile
+                      that evaluated the override set (whether or not a POST to orb followed).
+                      Distinct from LastPostedAt: the reporter skips the POST when the payload
+                      is unchanged (dedup) or the last POST was already empty (quiet-state).
+                      A recent LastCheckedForDivergence with a stale LastPostedAt means the
+                      reporter is healthy and the override set is steady — not that it is stuck.
+                    format: date-time
+                    type: string
                   lastPostedAt:
                     description: LastPostedAt is the timestamp of the last successful
                       POST to orb.
@@ -435,6 +456,11 @@ spec:
                 description: |-
                   LastAppliedDigest is the artifact manifest digest (X-Orb-Digest) from the most
                   recent successful consume dispatch.
+                type: string
+              lastAppliedVersion:
+                description: |-
+                  LastAppliedVersion is the OCI tag (X-Orb-Tag) from the most recent
+                  successful consume dispatch, e.g. "v38".
                 type: string
               lastOrbImportID:
                 description: |-

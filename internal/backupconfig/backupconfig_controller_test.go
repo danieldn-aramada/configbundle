@@ -187,7 +187,7 @@ func sampleBackupConfig() *armadav1.BackupConfig {
 				OrbID:    "colo:cluster-001-velero",
 				Enabled:  ptr.To(true),
 				Schedule: ptr.To("0 2 * * *"),
-				Location: ptr.To("default"),
+				Location: ptr.To("s3://test-cluster-bucket/velero"),
 			},
 			Etcd: &armadav1.EtcdBackupSpec{
 				OrbID:    "colo:cluster-001-etcd",
@@ -221,7 +221,7 @@ func TestReconcile_CreatesVeleroScheduleAndEtcdCronJob(t *testing.T) {
 	if got, _, _ := unstructured.NestedString(sched.Object, "spec", "schedule"); got != "0 2 * * *" {
 		t.Errorf("velero schedule: got %q", got)
 	}
-	if got, _, _ := unstructured.NestedString(sched.Object, "spec", "template", "storageLocation"); got != "default" {
+	if got, _, _ := unstructured.NestedString(sched.Object, "spec", "template", "storageLocation"); got != "velero" {
 		t.Errorf("velero storageLocation: got %q", got)
 	}
 	if paused, _, _ := unstructured.NestedBool(sched.Object, "spec", "paused"); paused {
@@ -366,7 +366,7 @@ func TestReconcile_BackfillsOwnerReferenceOnPreExistingSubResources(t *testing.T
 	sched.SetNamespace(testVeleroNs)
 	sched.SetName(veleroScheduleName(bc))
 	_ = unstructured.SetNestedField(sched.Object, "0 2 * * *", "spec", "schedule")
-	_ = unstructured.SetNestedField(sched.Object, "default", "spec", "template", "storageLocation")
+	_ = unstructured.SetNestedField(sched.Object, "velero", "spec", "template", "storageLocation")
 	_ = unstructured.SetNestedField(sched.Object, false, "spec", "paused")
 
 	// etcd CronJob: spec matches sampleBackupConfig's intent exactly.
@@ -559,11 +559,11 @@ func TestVeleroDeltas_NotFound(t *testing.T) {
 		Location: ptr.To("default"),
 		Enabled:  ptr.To(true),
 	}
-	d, err := veleroDeltas(context.Background(), c, r.VeleroNamespace, "missing-velero", block)
+	d, err := veleroDeltas(context.Background(), c, r.VeleroNamespace, "missing-velero", block, "colo:cluster-001")
 	if err != nil {
 		t.Fatalf("veleroDeltas: %v", err)
 	}
-	if d["schedule"] != "0 2 * * *" || d["storageLocation"] != "default" || d["paused"] != "false" {
+	if d["schedule"] != "0 2 * * *" || d["storageLocation"] != "default" || d["paused"] != "false" || d["annotation:cluster-orb-id"] != "colo:cluster-001" {
 		t.Errorf("expected all-fields delta when missing, got %+v", d)
 	}
 }
@@ -600,7 +600,7 @@ func TestReadLiveObserved_LivesResourcesPresent(t *testing.T) {
 	sched.SetNamespace(testVeleroNs)
 	sched.SetName("colo-cluster-001-velero")
 	_ = unstructured.SetNestedField(sched.Object, "0 2 * * *", "spec", "schedule")
-	_ = unstructured.SetNestedField(sched.Object, "default", "spec", "template", "storageLocation")
+	_ = unstructured.SetNestedField(sched.Object, "velero", "spec", "template", "storageLocation")
 	_ = unstructured.SetNestedField(sched.Object, false, "spec", "paused")
 
 	cj := &batchv1.CronJob{
@@ -627,7 +627,7 @@ func TestReadLiveObserved_LivesResourcesPresent(t *testing.T) {
 	if !stringPtrEqual(got.Velero.Schedule, ptr.To("0 2 * * *")) {
 		t.Errorf("velero.schedule: got %v", got.Velero.Schedule)
 	}
-	if !stringPtrEqual(got.Velero.Location, ptr.To("default")) {
+	if !stringPtrEqual(got.Velero.Location, ptr.To("velero")) {
 		t.Errorf("velero.location: got %v", got.Velero.Location)
 	}
 	if got.Etcd == nil {

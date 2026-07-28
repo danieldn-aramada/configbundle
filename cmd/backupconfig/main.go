@@ -84,6 +84,13 @@ type Config struct {
 	// the AZURE_* creds mount.
 	ObserveInterval time.Duration `envconfig:"BACKUP_OBSERVE_INTERVAL" default:"0s"`
 
+	VeleroS3URL            string `envconfig:"VELERO_S3_URL"`
+	VeleroS3Region         string `envconfig:"VELERO_S3_REGION" default:"default"`
+	VeleroS3ForcePathStyle bool   `envconfig:"VELERO_S3_FORCE_PATH_STYLE" default:"true"`
+	// Azure BSL config — set via overlay per cluster. Long-term these move to the Orbital schema.
+	VeleroAzureResourceGroup    string `envconfig:"VELERO_AZURE_RESOURCE_GROUP"`
+	VeleroAzureSubscriptionID   string `envconfig:"VELERO_AZURE_SUBSCRIPTION_ID"`
+	VeleroAzureCredentialSecret string `envconfig:"VELERO_AZURE_CRED_SECRET" default:"cloud-credentials-v2"`
 	// EtcdSnapshotStaleAfter is the staleness threshold for the BackupsFresh
 	// condition — when the NEWEST snapshot is older than this, the condition
 	// flips to False (SnapshotStale). It is a health alarm only and never
@@ -164,22 +171,39 @@ func main() {
 		"etcd", cfg.EtcdBackupNamespace,
 		"etcdctlImage", cfg.EtcdctlImage,
 		"uploadImage", cfg.UploadImage,
-		"credentialSecret", cfg.CredentialSecret)
+		"credentialSecret", cfg.CredentialSecret,
+		"veleroS3URL", cfg.VeleroS3URL,
+		"veleroS3Region", cfg.VeleroS3Region,
+		"veleroS3ForcePathStyle", cfg.VeleroS3ForcePathStyle,
+		"veleroAzureResourceGroup", cfg.VeleroAzureResourceGroup,
+		"veleroAzureSubscriptionID", cfg.VeleroAzureSubscriptionID,
+		"veleroAzureCredentialSecret", cfg.VeleroAzureCredentialSecret)
+
+	if cfg.ObserveInterval > 0 {
+		setupLog.Info("drift-detection polling enabled", "interval", cfg.ObserveInterval)
+	} else {
+		setupLog.Info("drift-detection polling disabled (event-driven only); set BACKUP_OBSERVE_INTERVAL to enable")
+	}
 
 	reconciler := &backupconfig.BackupConfigReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		VeleroNamespace:     cfg.VeleroNamespace,
-		EtcdBackupNamespace: cfg.EtcdBackupNamespace,
-		EtcdctlImage:        cfg.EtcdctlImage,
-		UploadImage:         cfg.UploadImage,
-		CredentialSecret:    cfg.CredentialSecret,
-		EtcdRetainPerDay:    cfg.RetainPerDay,
-		EtcdRetainDays:      cfg.RetainDays,
-		EtcdGCSchedule:      cfg.GCSchedule,
-		EtcdBackupTimeZone:  cfg.TimeZone,
-		ObserveInterval:     cfg.ObserveInterval,
-		Recorder:            mgr.GetEventRecorderFor("backupconfig-controller"),
+		Client:                      mgr.GetClient(),
+		Scheme:                      mgr.GetScheme(),
+		VeleroNamespace:             cfg.VeleroNamespace,
+		EtcdBackupNamespace:         cfg.EtcdBackupNamespace,
+		EtcdctlImage:                cfg.EtcdctlImage,
+		UploadImage:                 cfg.UploadImage,
+		CredentialSecret:            cfg.CredentialSecret,
+		EtcdRetainPerDay:            cfg.RetainPerDay,
+    EtcdGCSchedule:              cfg.GCSchedule
+		EtcdBackupTimeZone:          cfg.TimeZone,
+		ObserveInterval:             cfg.ObserveInterval,
+		VeleroS3URL:                 cfg.VeleroS3URL,
+		VeleroS3Region:              cfg.VeleroS3Region,
+		VeleroS3ForcePathStyle:      cfg.VeleroS3ForcePathStyle,
+		VeleroAzureResourceGroup:    cfg.VeleroAzureResourceGroup,
+		VeleroAzureSubscriptionID:   cfg.VeleroAzureSubscriptionID,
+		VeleroAzureCredentialSecret: cfg.VeleroAzureCredentialSecret,
+		Recorder:                    mgr.GetEventRecorderFor("backupconfig-controller"),
 	}
 
 	// etcd artifact-observation follows the observe interval — setting it (>0)
