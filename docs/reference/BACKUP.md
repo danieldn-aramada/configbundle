@@ -234,6 +234,15 @@ signals + `velero_*` + KSM, not bc absorbing everyone's metrics.
 - **Azure creds live in an overlay, never the shared base.** Base ships
   observation off + credential-free; `config/overlays/dev-main` patches the
   interval and mounts `az-storage-creds`.
+- **Velero Schedule identity annotation is `orbital.armada.ai/cluster-orb-id`
+  (annotation, NOT a label).** Raw orbId value — no colon sanitization. Use
+  `app.kubernetes.io/managed-by` for selector queries; the annotation is for
+  cloud-side correlation (AEP SVC / Backup SVC) only. Do NOT switch back to a
+  label — K8s rejects colons in label values.
+- **Azure BSL `resourceGroup` + `subscriptionId` are overlay-managed for now.**
+  Long-term they move to the Orbital VeleroBackup schema. Set via
+  `VELERO_AZURE_RESOURCE_GROUP` / `VELERO_AZURE_SUBSCRIPTION_ID` env vars in
+  the cluster overlay.
 
 ---
 

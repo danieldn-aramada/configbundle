@@ -1,4 +1,4 @@
-# Playbook: Add a new field to a CRD
+# Add a new field to a CRD
 
 You want to add a new field to `ConfigBundle`, `ServerConfig`, or
 `BackupConfig` (or one of their nested types like `IdracSettingsSpec`,

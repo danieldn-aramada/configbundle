@@ -1,4 +1,4 @@
-# Playbook: Tag and release
+# Tag and release
 
 configbundle ships four independent binaries. Each gets its own tag
 namespace + image; you version them independently.
