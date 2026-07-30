@@ -27,6 +27,7 @@ import (
 const (
 	etcdSnapshotTakerContainerName  = "snapshot-taker"
 	etcdSnapshotWriterContainerName = "snapshot-writer"
+	etcdGCContainerName             = "snapshot-gc"
 	etcdSnapshotVolumeName          = "backup-dir"
 	etcdSnapshotVolumeSize          = "2Gi"
 	etcdPKIVolumeName               = "pki"
@@ -55,6 +56,9 @@ rm "$SNAPSHOT_PATH"
 // bc-controller parsing spec.etcd.location; RETAIN_PER_DAY comes from
 // controller config. The prune is scoped to "$BLOB_PREFIX/" so it can only
 // ever touch THIS cluster's folder.
+//
+// Day-level cutoff (spec.etcd.retentionDays) is handled by a separate GC
+// CronJob — single responsibility.
 const snapshotWriterScript = `set -eu
 az login --service-principal --username "$AZURE_CLIENT_ID" --password "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID"
 
@@ -70,8 +74,7 @@ az storage blob upload \
   --file "/tmp/etcd-backups/${SNAPSHOT_NAME}" \
   --auth-mode login
 
-# --- 2. Prune ---
-# Isolated in a subshell so prune errors never fail the job (upload succeeded).
+# --- 2. Prune: keep newest RETAIN_PER_DAY snapshots per UTC day ---
 (
   set +e
   ALL=$(az storage blob list \
@@ -82,42 +85,61 @@ az storage blob upload \
     --auth-mode login \
     --query "[].name" -o tsv)
 
-  if [ -n "$RETENTION_DAYS" ] && [ "$RETENTION_DAYS" -gt 0 ]; then
-    # Age-based: python3 is available in the azure-cli image.
-    CUTOFF=$(python3 -c "from datetime import date, timedelta; print((date.today() - timedelta(days=$RETENTION_DAYS)).strftime('%Y-%m-%d'))")
-    echo "=== Age-based prune for $PREFIX (deleting snapshots before $CUTOFF, retention=${RETENTION_DAYS}d) ==="
-    echo "$ALL" | grep "snapshot-" | while read -r BLOB; do
-      BLOB_DATE=$(echo "$BLOB" | sed -n 's#.*snapshot-\([0-9-]*\)T.*#\1#p')
-      if [ -n "$BLOB_DATE" ] && [ "$BLOB_DATE" \< "$CUTOFF" ]; then
-        echo "Deleting $BLOB (date $BLOB_DATE older than cutoff $CUTOFF)"
-        az storage blob delete \
-          --account-name "$STORAGE_ACCOUNT" \
-          --container-name "$STORAGE_CONTAINER" \
-          --name "$BLOB" \
-          --auth-mode login \
-          || echo "WARN: failed to delete $BLOB (continuing)"
-      fi
+  KEEP_FROM=$((RETAIN_PER_DAY + 1))
+  echo "=== Count-based prune for $PREFIX (keeping newest $RETAIN_PER_DAY per day) ==="
+  DATES=$(echo "$ALL" | sed -n 's#.*snapshot-\([0-9-]*\)T.*#\1#p' | sort -u)
+  for DAY in $DATES; do
+    echo "--- Pruning day $DAY (keeping newest $RETAIN_PER_DAY) ---"
+    echo "$ALL" | grep "snapshot-${DAY}T" | sort -r | tail -n +$KEEP_FROM | while read -r BLOB; do
+      echo "Deleting $BLOB"
+      az storage blob delete \
+        --account-name "$STORAGE_ACCOUNT" \
+        --container-name "$STORAGE_CONTAINER" \
+        --name "$BLOB" \
+        --auth-mode login \
+        || echo "WARN: failed to delete $BLOB (continuing)"
     done
-  else
-    # Count-based fallback: keep newest RETAIN_PER_DAY snapshots per UTC day.
-    KEEP_FROM=$((RETAIN_PER_DAY + 1))
-    echo "=== Count-based prune for $PREFIX (keeping newest $RETAIN_PER_DAY per day) ==="
-    DATES=$(echo "$ALL" | sed -n 's#.*snapshot-\([0-9-]*\)T.*#\1#p' | sort -u)
-    for DAY in $DATES; do
-      echo "--- Pruning day $DAY (keeping newest $RETAIN_PER_DAY) ---"
-      echo "$ALL" | grep "snapshot-${DAY}T" | sort -r | tail -n +$KEEP_FROM | while read -r BLOB; do
-        echo "Deleting $BLOB"
-        az storage blob delete \
-          --account-name "$STORAGE_ACCOUNT" \
-          --container-name "$STORAGE_CONTAINER" \
-          --name "$BLOB" \
-          --auth-mode login \
-          || echo "WARN: failed to delete $BLOB (continuing)"
-      done
-    done
-  fi
+  done
 )
 echo "=== Prune finished ==="
+`
+
+// snapshotGCScript drops all blobs under BLOB_PREFIX whose date part is older
+// than RETAIN_DAYS UTC days ago. Run in a dedicated GC CronJob — single
+// responsibility. RETAIN_DAYS comes from spec.etcd.retentionDays on the
+// BackupConfig CR; the azure-cli image includes python3 for date arithmetic
+// (Alpine busybox date does not support -d "N days ago").
+const snapshotGCScript = `set -eu
+az login --service-principal --username "$AZURE_CLIENT_ID" --password "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID"
+
+PREFIX="$BLOB_PREFIX/"
+
+ALL=$(az storage blob list \
+  --account-name "$STORAGE_ACCOUNT" \
+  --container-name "$STORAGE_CONTAINER" \
+  --prefix "$PREFIX" \
+  --num-results "*" \
+  --auth-mode login \
+  --query "[].name" -o tsv)
+
+CUTOFF=$(python3 -c "from datetime import date, timedelta; print((date.today() - timedelta(days=$RETAIN_DAYS)).strftime('%Y-%m-%d'))")
+echo "=== Day-level GC for $PREFIX (retentionDays=${RETAIN_DAYS}, cutoff=$CUTOFF) ==="
+(
+  set +e
+  echo "$ALL" | grep "snapshot-" | while read -r BLOB; do
+    BLOB_DATE=$(echo "$BLOB" | sed -n 's#.*snapshot-\([0-9-]*\)T.*#\1#p')
+    if [ -n "$BLOB_DATE" ] && [ "$BLOB_DATE" \< "$CUTOFF" ]; then
+      echo "Deleting $BLOB (date $BLOB_DATE before cutoff $CUTOFF)"
+      az storage blob delete \
+        --account-name "$STORAGE_ACCOUNT" \
+        --container-name "$STORAGE_CONTAINER" \
+        --name "$BLOB" \
+        --auth-mode login \
+        || echo "WARN: failed to delete $BLOB (continuing)"
+    fi
+  done
+)
+echo "=== Day-level GC finished ==="
 `
 
 // etcdCronJobName builds the deterministic CronJob name for a BackupConfig.
@@ -127,6 +149,11 @@ echo "=== Prune finished ==="
 // so the suffix must NOT repeat "backup".
 func etcdCronJobName(bc *armadav1.BackupConfig) string {
 	return bc.Name + "-etcd"
+}
+
+// etcdGCCronJobName builds the deterministic GC CronJob name for a BackupConfig.
+func etcdGCCronJobName(bc *armadav1.BackupConfig) string {
+	return bc.Name + "-etcd-gc"
 }
 
 // parseAzureBlobURL parses an Azure Blob HTTPS URL of the form
@@ -181,9 +208,9 @@ func parseAzureBlobURL(location string) (account, container, prefix string, err 
 	return account, container, prefix, nil
 }
 
-// reconcileEtcd applies the desired etcd CronJob from bc.Spec.Etcd.
-// Returns a human-readable summary of the PATCH (empty string = no PATCH
-// needed) or an error if the apply failed.
+// reconcileEtcd applies the desired etcd CronJob from bc.Spec.Etcd, then
+// reconciles the GC CronJob if spec.etcd.retentionDays is set.
+// Returns a human-readable summary of any PATCHes made, or an error.
 //
 // "Enabled = false" maps to spec.suspend = true on the CronJob — K8s' native
 // pause toggle. The CronJob stays in place when disabled, so re-enabling is
@@ -213,7 +240,6 @@ func (r *BackupConfigReconciler) reconcileEtcd(ctx context.Context, bc *armadav1
 		UploadImage:      r.UploadImage,
 		CredentialSecret: r.CredentialSecret,
 		RetainPerDay:     r.EtcdRetainPerDay,
-		RetentionDays:    block.RetentionDays,
 		TimeZone:         r.EtcdBackupTimeZone,
 		Block:            block,
 	}
@@ -244,9 +270,82 @@ func (r *BackupConfigReconciler) reconcileEtcd(ctx context.Context, bc *armadav1
 
 	if len(deltas) == 0 {
 		logger.V(1).Info("etcd cronjob already matches intent (metadata reconciled)", "name", name)
+	}
+
+	gcSummary, err := r.reconcileEtcdGC(ctx, bc, account, container, prefix)
+	if err != nil {
+		return "", err
+	}
+
+	var parts []string
+	if len(deltas) > 0 {
+		parts = append(parts, formatBlockDeltas(fmt.Sprintf("etcd/%s", name), deltas))
+	}
+	if gcSummary != "" {
+		parts = append(parts, gcSummary)
+	}
+	return strings.Join(parts, "; "), nil
+}
+
+// reconcileEtcdGC creates or updates the GC CronJob when spec.etcd.retentionDays
+// is set, and deletes it when retentionDays is cleared.
+func (r *BackupConfigReconciler) reconcileEtcdGC(ctx context.Context, bc *armadav1.BackupConfig, account, container, prefix string) (string, error) {
+	logger := log.FromContext(ctx).WithName("backupconfig.etcd-gc")
+	block := bc.Spec.Etcd
+	gcName := etcdGCCronJobName(bc)
+
+	if block.RetentionDays == nil {
+		// No retention configured — delete the GC CronJob if it exists.
+		var existing batchv1.CronJob
+		err := r.Get(ctx, types.NamespacedName{Namespace: r.EtcdBackupNamespace, Name: gcName}, &existing)
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("get etcd gc cronjob: %w", err)
+		}
+		if err := r.Delete(ctx, &existing); err != nil && !apierrors.IsNotFound(err) {
+			return "", fmt.Errorf("delete etcd gc cronjob %s/%s: %w", r.EtcdBackupNamespace, gcName, err)
+		}
+		logger.Info("deleted etcd gc cronjob (retentionDays cleared)", "name", gcName)
 		return "", nil
 	}
-	return formatBlockDeltas(fmt.Sprintf("etcd/%s", name), deltas), nil
+
+	gcParams := etcdGCCronJobParams{
+		Name:             gcName,
+		Namespace:        r.EtcdBackupNamespace,
+		StorageAccount:   account,
+		StorageContainer: container,
+		BlobPrefix:       prefix,
+		UploadImage:      r.UploadImage,
+		CredentialSecret: r.CredentialSecret,
+		RetainDays:       *block.RetentionDays,
+		Schedule:         r.EtcdGCSchedule,
+		TimeZone:         r.EtcdBackupTimeZone,
+		Block:            block,
+	}
+
+	gcDeltas, err := etcdGCDeltas(ctx, r.Client, r.EtcdBackupNamespace, gcName, gcParams)
+	if err != nil {
+		return "", err
+	}
+
+	gcCJ := buildEtcdGCCronJob(gcParams)
+	if err := ctrl.SetControllerReference(bc, gcCJ, r.Scheme); err != nil {
+		return "", fmt.Errorf("set owner on etcd gc cronjob: %w", err)
+	}
+	if err := r.Patch(ctx, gcCJ, client.Apply,
+		client.FieldOwner(fieldManager),
+		client.ForceOwnership,
+	); err != nil {
+		return "", fmt.Errorf("ssa patch etcd gc cronjob %s/%s: %w", r.EtcdBackupNamespace, gcName, err)
+	}
+
+	if len(gcDeltas) == 0 {
+		logger.V(1).Info("etcd gc cronjob already matches intent (metadata reconciled)", "name", gcName)
+		return "", nil
+	}
+	return formatBlockDeltas(fmt.Sprintf("etcd-gc/%s", gcName), gcDeltas), nil
 }
 
 // etcdCronJobParams carries every piece of state buildEtcdCronJob needs to
@@ -261,8 +360,7 @@ type etcdCronJobParams struct {
 	EtcdctlImage     string
 	UploadImage      string
 	CredentialSecret string
-	RetainPerDay     int    // how many snapshots to keep per UTC day (fallback when RetentionDays is nil)
-	RetentionDays    *int   // from spec.etcd.retentionDays; when set, overrides count-based prune with age-based
+	RetainPerDay     int    // how many snapshots to keep per UTC day
 	TimeZone         string // IANA tz for the schedule ("" = cluster default/UTC)
 	Block            *armadav1.EtcdBackupSpec
 }
@@ -271,7 +369,8 @@ type etcdCronJobParams struct {
 // `kube-system/etcd-backup` shape on colo-dev-main:
 //   - hostNetwork on the control-plane node (to reach the local etcd)
 //   - initContainer takes the snapshot with etcdctl using host-mounted PKI
-//   - main container uploads the tarball to Azure Blob via az-cli
+//   - main container uploads the tarball to Azure Blob via az-cli and prunes
+//     old snapshots (count-based: keep newest RETAIN_PER_DAY per UTC day)
 //   - credentials come from a K8s Secret referenced by name
 //   - blob path: <container>/<galleon>/<cluster>/<snapshot>
 //
@@ -307,7 +406,6 @@ func buildEtcdCronJob(p etcdCronJobParams) *batchv1.CronJob {
 		{Name: "STORAGE_CONTAINER", Value: p.StorageContainer},
 		{Name: "BLOB_PREFIX", Value: p.BlobPrefix},
 		{Name: "RETAIN_PER_DAY", Value: fmt.Sprintf("%d", p.RetainPerDay)},
-		{Name: "RETENTION_DAYS", Value: retentionDaysEnv(p.RetentionDays)},
 	}
 
 	volumes := []corev1.Volume{
@@ -391,6 +489,100 @@ func buildEtcdCronJob(p etcdCronJobParams) *batchv1.CronJob {
 		},
 		Spec: batchv1.CronJobSpec{
 			Schedule:                   schedule,
+			ConcurrencyPolicy:          batchv1.ForbidConcurrent,
+			SuccessfulJobsHistoryLimit: ptr.To(int32(3)),
+			FailedJobsHistoryLimit:     ptr.To(int32(3)),
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{Spec: podSpec},
+				},
+			},
+		},
+	}
+	if p.TimeZone != "" {
+		cj.Spec.TimeZone = ptr.To(p.TimeZone)
+	}
+	if p.Block.Enabled != nil {
+		suspend := !*p.Block.Enabled
+		cj.Spec.Suspend = &suspend
+	}
+	return cj
+}
+
+// etcdGCCronJobParams carries every piece of state buildEtcdGCCronJob needs.
+type etcdGCCronJobParams struct {
+	Name             string
+	Namespace        string
+	StorageAccount   string
+	StorageContainer string
+	BlobPrefix       string
+	UploadImage      string
+	CredentialSecret string
+	RetainDays       int    // from spec.etcd.retentionDays on the BackupConfig CR
+	Schedule         string // from controller config (EtcdGCSchedule)
+	TimeZone         string
+	Block            *armadav1.EtcdBackupSpec
+}
+
+// buildEtcdGCCronJob constructs the GC CronJob that drops blobs older than
+// RetainDays UTC days. Unlike the snapshot CronJob it does not need hostNetwork
+// or a control-plane node selector — it only calls Azure Blob APIs.
+func buildEtcdGCCronJob(p etcdGCCronJobParams) *batchv1.CronJob {
+	envRefs := []corev1.EnvVar{
+		{Name: "AZURE_CLIENT_ID", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: p.CredentialSecret},
+				Key:                  "client-id",
+			},
+		}},
+		{Name: "AZURE_CLIENT_SECRET", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: p.CredentialSecret},
+				Key:                  "client-secret",
+			},
+		}},
+		{Name: "AZURE_TENANT_ID", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: p.CredentialSecret},
+				Key:                  "tenant-id",
+			},
+		}},
+		{Name: "STORAGE_ACCOUNT", Value: p.StorageAccount},
+		{Name: "STORAGE_CONTAINER", Value: p.StorageContainer},
+		{Name: "BLOB_PREFIX", Value: p.BlobPrefix},
+		{Name: "RETAIN_DAYS", Value: fmt.Sprintf("%d", p.RetainDays)},
+	}
+
+	gcContainer := corev1.Container{
+		Name:    etcdGCContainerName,
+		Image:   p.UploadImage,
+		Command: []string{"/bin/sh", "-c", snapshotGCScript},
+		Env:     envRefs,
+		Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("200m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			},
+		},
+	}
+
+	podSpec := corev1.PodSpec{
+		RestartPolicy:                 corev1.RestartPolicyNever,
+		Containers:                    []corev1.Container{gcContainer},
+		TerminationGracePeriodSeconds: ptr.To(int64(30)),
+	}
+
+	cj := &batchv1.CronJob{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "batch/v1",
+			Kind:       "CronJob",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      p.Name,
+			Namespace: p.Namespace,
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule:                   p.Schedule,
 			ConcurrencyPolicy:          batchv1.ForbidConcurrent,
 			SuccessfulJobsHistoryLimit: ptr.To(int32(3)),
 			FailedJobsHistoryLimit:     ptr.To(int32(3)),
@@ -506,20 +698,52 @@ func etcdDeltas(ctx context.Context, c client.Client, namespace, name string, bl
 	if envValue(liveWriter.Env, "BLOB_PREFIX") != params.BlobPrefix {
 		out["blobPrefix"] = params.BlobPrefix
 	}
-	if envValue(liveWriter.Env, "RETENTION_DAYS") != retentionDaysEnv(params.RetentionDays) {
-		out["retentionDays"] = retentionDaysEnv(params.RetentionDays)
-	}
 	return out, nil
 }
 
-// retentionDaysEnv converts a nullable retentionDays pointer to the string
-// value for the RETENTION_DAYS env var. Nil maps to "" (unset), which tells
-// the prune script to fall back to count-based pruning.
-func retentionDaysEnv(days *int) string {
-	if days == nil {
-		return ""
+// etcdGCDeltas returns the set of fields that differ between the live GC
+// CronJob and the intent. NotFound means all fields are deltas (first create).
+func etcdGCDeltas(ctx context.Context, c client.Client, namespace, name string, params etcdGCCronJobParams) (map[string]string, error) {
+	out := map[string]string{}
+
+	var live batchv1.CronJob
+	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &live)
+	switch {
+	case apierrors.IsNotFound(err):
+		out["schedule"] = params.Schedule
+		out["storageAccount"] = params.StorageAccount
+		out["storageContainer"] = params.StorageContainer
+		out["blobPrefix"] = params.BlobPrefix
+		out["retainDays"] = fmt.Sprintf("%d", params.RetainDays)
+		return out, nil
+	case err != nil:
+		return nil, fmt.Errorf("get etcd gc cronjob: %w", err)
 	}
-	return fmt.Sprintf("%d", *days)
+
+	if live.Spec.Schedule != params.Schedule {
+		out["schedule"] = params.Schedule
+	}
+	gcContainer := findContainer(live.Spec.JobTemplate.Spec.Template.Spec.Containers, etcdGCContainerName)
+	if gcContainer == nil {
+		out["storageAccount"] = params.StorageAccount
+		out["storageContainer"] = params.StorageContainer
+		out["blobPrefix"] = params.BlobPrefix
+		out["retainDays"] = fmt.Sprintf("%d", params.RetainDays)
+		return out, nil
+	}
+	if envValue(gcContainer.Env, "STORAGE_ACCOUNT") != params.StorageAccount {
+		out["storageAccount"] = params.StorageAccount
+	}
+	if envValue(gcContainer.Env, "STORAGE_CONTAINER") != params.StorageContainer {
+		out["storageContainer"] = params.StorageContainer
+	}
+	if envValue(gcContainer.Env, "BLOB_PREFIX") != params.BlobPrefix {
+		out["blobPrefix"] = params.BlobPrefix
+	}
+	if envValue(gcContainer.Env, "RETAIN_DAYS") != fmt.Sprintf("%d", params.RetainDays) {
+		out["retainDays"] = fmt.Sprintf("%d", params.RetainDays)
+	}
+	return out, nil
 }
 
 func findContainer(cs []corev1.Container, name string) *corev1.Container {

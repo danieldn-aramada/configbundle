@@ -74,6 +74,8 @@ spec:
           value: "5"
         - name: ETCD_BACKUP_TIMEZONE
           value: "America/Los_Angeles"
+        - name: ETCD_GC_SCHEDULE
+          value: "0 0 * * *"
         # Observe switch + cadence — ONE knob (mirrors serverconfig's
         # IDRAC_OBSERVE_INTERVAL; there is no separate on/off flag). Set it (>0)
         # to turn etcd artifact-observation ON: bc polls the backup store (Azure

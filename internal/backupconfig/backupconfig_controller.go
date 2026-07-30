@@ -95,6 +95,12 @@ type BackupConfigReconciler struct {
 	// (e.g. "America/Los_Angeles"). Empty string uses the cluster default (UTC).
 	EtcdBackupTimeZone string
 
+	// EtcdGCSchedule is the cron schedule for the day-level GC CronJob that
+	// drops blobs older than spec.etcd.retentionDays. Only consulted when the
+	// BackupConfig CR has spec.etcd.retentionDays set. From controller config
+	// (ETCD_GC_SCHEDULE env), not from the CR.
+	EtcdGCSchedule string
+
 	// ObserveInterval is the cadence at which the reconciler re-polls Velero +
 	// CronJob state even when nothing on the CR has changed. Drives drift
 	// detection. Zero = no periodic poll (event-driven only).
