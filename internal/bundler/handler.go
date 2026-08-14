@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
 	armadav1 "github.com/armada/configbundle/api/v1"
@@ -214,6 +216,9 @@ func mapToSpec(dc DataCenterResult) armadav1.ConfigBundleSpec {
 		if s.IdracSettings != nil {
 			srv.IdracSettings = mapIdrac(s.IdracSettings)
 		}
+		if s.ServerMaintenance != nil {
+			srv.Maintenance = mapMaintenance(s.ServerMaintenance)
+		}
 		spec.Servers = append(spec.Servers, srv)
 	}
 	for _, k := range dc.KubernetesClusters {
@@ -246,6 +251,48 @@ func mapIdrac(src *IdracSettingsResult) armadav1.IdracSettingsSpec {
 	}
 	json.Unmarshal(b, &dst)
 	return dst
+}
+
+// mapMaintenance translates a ServerMaintenanceResult from Orbital into a
+// MaintenanceSpec. Manual field mapping is required because windowStart/windowEnd
+// arrive as RFC3339 strings from GraphQL but the spec uses *metav1.Time. Absent
+// Orbital node maps to enabled:false (same as Orbital's default seed value).
+func mapMaintenance(src *ServerMaintenanceResult) *armadav1.MaintenanceSpec {
+	if src == nil {
+		return nil
+	}
+	dst := &armadav1.MaintenanceSpec{}
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.Reason != nil {
+		reason := *src.Reason
+		dst.Reason = &reason
+	}
+	if src.WindowStart != nil || src.WindowEnd != nil {
+		dst.Window = &armadav1.MaintenanceWindowSpec{}
+		if src.WindowStart != nil {
+			if t, err := parseRFC3339(*src.WindowStart); err == nil {
+				dst.Window.Start = t
+			}
+		}
+		if src.WindowEnd != nil {
+			if t, err := parseRFC3339(*src.WindowEnd); err == nil {
+				dst.Window.End = t
+			}
+		}
+	}
+	return dst
+}
+
+// parseRFC3339 parses an RFC3339 timestamp string into a *metav1.Time.
+func parseRFC3339(s string) (*metav1.Time, error) {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return nil, err
+	}
+	mt := metav1.NewTime(t)
+	return &mt, nil
 }
 
 // mapClusterBackup translates the GraphQL ClusterBackupResult into a

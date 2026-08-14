@@ -106,6 +106,57 @@ spec:
                 required:
                 - orbId
                 type: object
+              maintenance:
+                description: |-
+                  Maintenance controls when the controller may enter the maintenance sequence.
+                  Written by configbundle-controller from Orbital. local:admin may SSA-override.
+                  Nil and enabled:false are both treated as "no maintenance."
+                properties:
+                  drain:
+                    description: |-
+                      Drain tunes eviction behavior. NOT sourced from Orbital.
+                      Absent = controller defaults. Override via local:admin SSA only.
+                    properties:
+                      force:
+                        description: |-
+                          Force, if true, deletes pods that cannot be evicted due to PDB violations.
+                          Use with extreme caution — may disrupt protected workloads.
+                        type: boolean
+                      timeout:
+                        description: |-
+                          Timeout is the maximum time to wait for pod eviction to complete.
+                          Defaults to 10m. On expiry, phase transitions to Failed and an alert fires.
+                        type: string
+                    type: object
+                  enabled:
+                    description: |-
+                      Enabled is the authoritative on/off switch sourced from Orbital.
+                      true = maintenance requested; false (or absent struct) = no maintenance.
+                    type: boolean
+                  reason:
+                    description: Reason is a human-readable justification sourced
+                      from Orbital. Informational only.
+                    type: string
+                  window:
+                    description: Window optionally restricts when the controller may
+                      begin. Nil = begin immediately when enabled.
+                    properties:
+                      end:
+                        description: |-
+                          End is the deadline for entry. After this time the controller will not
+                          start a new maintenance sequence, but in-flight sequences run to completion.
+                        format: date-time
+                        type: string
+                      start:
+                        description: |-
+                          Start is the earliest time the controller may begin maintenance.
+                          Nil = begin as soon as enabled.
+                        format: date-time
+                        type: string
+                    type: object
+                required:
+                - enabled
+                type: object
               oobIP:
                 description: OobIP is the iDRAC management IP. The ServerConfig controller
                   targets Redfish here.
@@ -227,6 +278,50 @@ spec:
                   timestamp, no message. Nil = no successful reconcile yet.
                 format: date-time
                 type: string
+              maintenance:
+                description: Maintenance reflects the current maintenance sequence
+                  state.
+                properties:
+                  cordonedAt:
+                    description: CordonedAt is the time the node was cordoned. Cleared
+                      when maintenance exits.
+                    format: date-time
+                    type: string
+                  drainProgressPercentage:
+                    description: DrainProgressPercentage is the percent of pods evicted
+                      (0–100).
+                    format: int32
+                    type: integer
+                  drainedAt:
+                    description: DrainedAt is the time drain completed (entry to Active).
+                      Cleared when maintenance exits.
+                    format: date-time
+                    type: string
+                  lastError:
+                    description: LastError is the most recent reconcile error, if
+                      any.
+                    type: string
+                  lastMaintenanceAt:
+                    description: |-
+                      LastMaintenanceAt is the time the most recent maintenance sequence completed (Done).
+                      Persists after Done for audit/alerting purposes.
+                    format: date-time
+                    type: string
+                  pendingPods:
+                    description: PendingPods lists pod names still awaiting eviction.
+                    items:
+                      type: string
+                    type: array
+                  phase:
+                    description: Phase is the current phase of the maintenance sequence.
+                    enum:
+                    - Draining
+                    - Active
+                    - Restoring
+                    - Done
+                    - Failed
+                    type: string
+                type: object
               observedGeneration:
                 description: |-
                   ObservedGeneration is the spec.generation the controller last successfully

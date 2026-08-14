@@ -124,6 +124,12 @@ type ServerSpec struct {
 	// (see IdracSettingsSpec).
 	// +optional
 	IdracSettings IdracSettingsSpec `json:"idracSettings,omitempty"`
+
+	// Maintenance controls when the sc-controller may enter the maintenance sequence.
+	// Written by configbundle-controller from Orbital. local:admin may SSA-override.
+	// Nil and enabled:false are both treated as "no maintenance."
+	// +optional
+	Maintenance *MaintenanceSpec `json:"maintenance,omitempty"`
 }
 
 // TakeoverEntry represents a cloud admin's "force" resolution: reclaim ownership

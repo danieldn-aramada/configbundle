@@ -281,6 +281,7 @@ func (r *ConfigBundleReconciler) applyServerConfig(ctx context.Context, cb *arma
 			Hostname:      server.Hostname,
 			OobIP:         server.OobIP,
 			IdracSettings: server.IdracSettings,
+			Maintenance:   server.Maintenance,
 		},
 	}
 

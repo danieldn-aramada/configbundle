@@ -36,3 +36,6 @@ coverage.out
 *.xlsx
 *.pptx
 *:Zone.Identifier
+
+# Local design scratchpad — not for review, not committed
+.local/

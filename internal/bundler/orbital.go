@@ -98,11 +98,22 @@ type S3SyncResult struct {
 
 // ServerResult is the GraphQL response shape for a Server node.
 type ServerResult struct {
-	Hostname      string               `json:"hostname"`
-	ServiceTag    string               `json:"serviceTag"`
-	OrbID         string               `json:"orbId"`
-	OobIP         *IPAddressResult     `json:"oobIP"`
-	IdracSettings *IdracSettingsResult `json:"idracSettings"`
+	Hostname          string                   `json:"hostname"`
+	ServiceTag        string                   `json:"serviceTag"`
+	OrbID             string                   `json:"orbId"`
+	OobIP             *IPAddressResult         `json:"oobIP"`
+	IdracSettings     *IdracSettingsResult     `json:"idracSettings"`
+	ServerMaintenance *ServerMaintenanceResult `json:"serverMaintenance"`
+}
+
+// ServerMaintenanceResult is the GraphQL response shape for a ServerMaintenance
+// ConfigItem node. Orbital seeds every server with an enabled:false node by
+// default — absent means the query returned null (no node yet).
+type ServerMaintenanceResult struct {
+	Enabled     *bool   `json:"enabled"`
+	WindowStart *string `json:"windowStart"`
+	WindowEnd   *string `json:"windowEnd"`
+	Reason      *string `json:"reason"`
 }
 
 // IPAddressResult is the GraphQL response shape for an IPAddress node.
@@ -164,6 +175,12 @@ query ConfigBundleByOrbID($orbId: String!) {
         usbManagementPortEnabled
         dhcpEnabled
         racadmEnabled
+      }
+      serverMaintenance {
+        enabled
+        windowStart
+        windowEnd
+        reason
       }
     }
     kubernetesClusters {

@@ -277,6 +277,57 @@ spec:
                       required:
                       - orbId
                       type: object
+                    maintenance:
+                      description: |-
+                        Maintenance controls when the sc-controller may enter the maintenance sequence.
+                        Written by configbundle-controller from Orbital. local:admin may SSA-override.
+                        Nil and enabled:false are both treated as "no maintenance."
+                      properties:
+                        drain:
+                          description: |-
+                            Drain tunes eviction behavior. NOT sourced from Orbital.
+                            Absent = controller defaults. Override via local:admin SSA only.
+                          properties:
+                            force:
+                              description: |-
+                                Force, if true, deletes pods that cannot be evicted due to PDB violations.
+                                Use with extreme caution — may disrupt protected workloads.
+                              type: boolean
+                            timeout:
+                              description: |-
+                                Timeout is the maximum time to wait for pod eviction to complete.
+                                Defaults to 10m. On expiry, phase transitions to Failed and an alert fires.
+                              type: string
+                          type: object
+                        enabled:
+                          description: |-
+                            Enabled is the authoritative on/off switch sourced from Orbital.
+                            true = maintenance requested; false (or absent struct) = no maintenance.
+                          type: boolean
+                        reason:
+                          description: Reason is a human-readable justification sourced
+                            from Orbital. Informational only.
+                          type: string
+                        window:
+                          description: Window optionally restricts when the controller
+                            may begin. Nil = begin immediately when enabled.
+                          properties:
+                            end:
+                              description: |-
+                                End is the deadline for entry. After this time the controller will not
+                                start a new maintenance sequence, but in-flight sequences run to completion.
+                              format: date-time
+                              type: string
+                            start:
+                              description: |-
+                                Start is the earliest time the controller may begin maintenance.
+                                Nil = begin as soon as enabled.
+                              format: date-time
+                              type: string
+                          type: object
+                      required:
+                      - enabled
+                      type: object
                     oobIP:
                       description: |-
                         OobIP is the out-of-band management (iDRAC) IP address.

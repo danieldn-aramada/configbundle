@@ -20,6 +20,109 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// MaintenancePhase is the current phase of the maintenance sequence.
+// +kubebuilder:validation:Enum=Draining;Active;Restoring;Done;Failed
+type MaintenancePhase string
+
+const (
+	// MaintenancePhaseDraining: node is being cordoned and pods evicted.
+	MaintenancePhaseDraining MaintenancePhase = "Draining"
+	// MaintenancePhaseActive: node is safe for maintenance operations (cordon + drain complete).
+	MaintenancePhaseActive MaintenancePhase = "Active"
+	// MaintenancePhaseRestoring: node returning to service (waiting for kubelet Ready, uncordoning).
+	MaintenancePhaseRestoring MaintenancePhase = "Restoring"
+	// MaintenancePhaseDone: node is back in service; lastMaintenanceAt is stamped.
+	MaintenancePhaseDone MaintenancePhase = "Done"
+	// MaintenancePhaseFailed: maintenance failed (drain timeout or Redfish error); requires human intervention.
+	MaintenancePhaseFailed MaintenancePhase = "Failed"
+)
+
+// MaintenanceWindowSpec defines the optional time window within which maintenance may begin.
+// Window gates ENTRY only — a running sequence is never aborted because the window closed.
+type MaintenanceWindowSpec struct {
+	// Start is the earliest time the controller may begin maintenance.
+	// Nil = begin as soon as enabled.
+	// +optional
+	Start *metav1.Time `json:"start,omitempty"`
+
+	// End is the deadline for entry. After this time the controller will not
+	// start a new maintenance sequence, but in-flight sequences run to completion.
+	// +optional
+	End *metav1.Time `json:"end,omitempty"`
+}
+
+// DrainSpec tunes eviction behavior. NOT sourced from Orbital.
+// Absent = controller defaults. Override via local:admin SSA only.
+type DrainSpec struct {
+	// Force, if true, deletes pods that cannot be evicted due to PDB violations.
+	// Use with extreme caution — may disrupt protected workloads.
+	// +optional
+	Force bool `json:"force,omitempty"`
+
+	// Timeout is the maximum time to wait for pod eviction to complete.
+	// Defaults to 10m. On expiry, phase transitions to Failed and an alert fires.
+	// +optional
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
+}
+
+// MaintenanceSpec controls when and how the sc-controller enters the maintenance
+// sequence for this server. Sourced from Orbital (configbundle-controller writes
+// it via SSA). local:admin may force-override via SSA for emergencies.
+//
+// Enabled is the authoritative gate — never gate on struct presence.
+// Nil spec and enabled:false are both "no maintenance."
+type MaintenanceSpec struct {
+	// Enabled is the authoritative on/off switch sourced from Orbital.
+	// true = maintenance requested; false (or absent struct) = no maintenance.
+	Enabled bool `json:"enabled"`
+
+	// Window optionally restricts when the controller may begin. Nil = begin immediately when enabled.
+	// +optional
+	Window *MaintenanceWindowSpec `json:"window,omitempty"`
+
+	// Reason is a human-readable justification sourced from Orbital. Informational only.
+	// +optional
+	Reason *string `json:"reason,omitempty"`
+
+	// Drain tunes eviction behavior. NOT sourced from Orbital.
+	// Absent = controller defaults. Override via local:admin SSA only.
+	// +optional
+	Drain *DrainSpec `json:"drain,omitempty"`
+}
+
+// MaintenanceStatus reflects the current maintenance sequence state.
+// History lives in Kubernetes Events; this struct holds only current state.
+type MaintenanceStatus struct {
+	// Phase is the current phase of the maintenance sequence.
+	// +optional
+	Phase MaintenancePhase `json:"phase,omitempty"`
+
+	// DrainProgressPercentage is the percent of pods evicted (0–100).
+	// +optional
+	DrainProgressPercentage *int32 `json:"drainProgressPercentage,omitempty"`
+
+	// PendingPods lists pod names still awaiting eviction.
+	// +optional
+	PendingPods []string `json:"pendingPods,omitempty"`
+
+	// LastError is the most recent reconcile error, if any.
+	// +optional
+	LastError *string `json:"lastError,omitempty"`
+
+	// CordonedAt is the time the node was cordoned. Cleared when maintenance exits.
+	// +optional
+	CordonedAt *metav1.Time `json:"cordonedAt,omitempty"`
+
+	// DrainedAt is the time drain completed (entry to Active). Cleared when maintenance exits.
+	// +optional
+	DrainedAt *metav1.Time `json:"drainedAt,omitempty"`
+
+	// LastMaintenanceAt is the time the most recent maintenance sequence completed (Done).
+	// Persists after Done for audit/alerting purposes.
+	// +optional
+	LastMaintenanceAt *metav1.Time `json:"lastMaintenanceAt,omitempty"`
+}
+
 // ServerConfigSpec mirrors the ServerSpec from ConfigBundle.
 // The ConfigBundle controller creates and updates this CR via SSA. ServerConfig
 // is derived state — admin overrides happen on the parent ConfigBundle CR only.
@@ -51,6 +154,12 @@ type ServerConfigSpec struct {
 	// Server.idracSettings edge.
 	// +optional
 	IdracSettings IdracSettingsSpec `json:"idracSettings,omitempty"`
+
+	// Maintenance controls when the controller may enter the maintenance sequence.
+	// Written by configbundle-controller from Orbital. local:admin may SSA-override.
+	// Nil and enabled:false are both treated as "no maintenance."
+	// +optional
+	Maintenance *MaintenanceSpec `json:"maintenance,omitempty"`
 }
 
 // ServerConfigPhase represents the current lifecycle phase.
@@ -110,6 +219,10 @@ type ServerConfigStatus struct {
 	// timestamp, no message. Nil = no successful reconcile yet.
 	// +optional
 	LastAppliedAt *metav1.Time `json:"lastAppliedAt,omitempty"`
+
+	// Maintenance reflects the current maintenance sequence state.
+	// +optional
+	Maintenance *MaintenanceStatus `json:"maintenance,omitempty"`
 }
 
 // ObservedIdracSettingsStatus mirrors the controller-managed subset of

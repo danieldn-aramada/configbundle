@@ -600,3 +600,159 @@ func TestMapClusterBackup_NilRetentionDaysProducesNilInSpec(t *testing.T) {
 
 func ptrString(s string) *string { return &s }
 func ptrBool(b bool) *bool       { return &b }
+
+// --- Unit tests for mapMaintenance ---
+
+func TestMapMaintenance_NilReturnsNil(t *testing.T) {
+	if got := mapMaintenance(nil); got != nil {
+		t.Errorf("expected nil for nil input, got %+v", got)
+	}
+}
+
+func TestMapMaintenance_EnabledFalseByDefault(t *testing.T) {
+	src := &ServerMaintenanceResult{Enabled: ptrBool(false)}
+	got := mapMaintenance(src)
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if got.Enabled {
+		t.Error("expected Enabled=false")
+	}
+}
+
+func TestMapMaintenance_EnabledTrue(t *testing.T) {
+	src := &ServerMaintenanceResult{Enabled: ptrBool(true)}
+	got := mapMaintenance(src)
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !got.Enabled {
+		t.Error("expected Enabled=true")
+	}
+}
+
+func TestMapMaintenance_ReasonFlowsThrough(t *testing.T) {
+	src := &ServerMaintenanceResult{
+		Enabled: ptrBool(true),
+		Reason:  ptrString("SSD replacement"),
+	}
+	got := mapMaintenance(src)
+	if got == nil || got.Reason == nil {
+		t.Fatal("expected non-nil result with reason")
+	}
+	if *got.Reason != "SSD replacement" {
+		t.Errorf("reason: got %q, want %q", *got.Reason, "SSD replacement")
+	}
+}
+
+func TestMapMaintenance_NilReasonProducesNilField(t *testing.T) {
+	src := &ServerMaintenanceResult{Enabled: ptrBool(true)}
+	got := mapMaintenance(src)
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if got.Reason != nil {
+		t.Errorf("expected nil Reason, got %q", *got.Reason)
+	}
+}
+
+func TestMapMaintenance_WindowStartAndEndParsed(t *testing.T) {
+	src := &ServerMaintenanceResult{
+		Enabled:     ptrBool(true),
+		WindowStart: ptrString("2026-08-14T08:00:00Z"),
+		WindowEnd:   ptrString("2026-08-14T12:00:00Z"),
+	}
+	got := mapMaintenance(src)
+	if got == nil || got.Window == nil {
+		t.Fatal("expected non-nil window")
+	}
+	if got.Window.Start == nil {
+		t.Error("expected non-nil window.start")
+	} else if got.Window.Start.UTC().Hour() != 8 {
+		t.Errorf("window.start hour: got %d, want 8", got.Window.Start.UTC().Hour())
+	}
+	if got.Window.End == nil {
+		t.Error("expected non-nil window.end")
+	} else if got.Window.End.UTC().Hour() != 12 {
+		t.Errorf("window.end hour: got %d, want 12", got.Window.End.UTC().Hour())
+	}
+}
+
+func TestMapMaintenance_NilWindowProducesNilWindowSpec(t *testing.T) {
+	src := &ServerMaintenanceResult{Enabled: ptrBool(true)}
+	got := mapMaintenance(src)
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if got.Window != nil {
+		t.Errorf("expected nil window, got %+v", got.Window)
+	}
+}
+
+func TestMapMaintenance_InvalidWindowTimestampSkipped(t *testing.T) {
+	src := &ServerMaintenanceResult{
+		Enabled:     ptrBool(true),
+		WindowStart: ptrString("not-a-timestamp"),
+		WindowEnd:   ptrString("2026-08-14T12:00:00Z"),
+	}
+	got := mapMaintenance(src)
+	if got == nil || got.Window == nil {
+		t.Fatal("expected non-nil result with window (WindowEnd is valid)")
+	}
+	if got.Window.Start != nil {
+		t.Errorf("expected nil window.start for invalid timestamp, got %v", got.Window.Start)
+	}
+	if got.Window.End == nil {
+		t.Error("expected non-nil window.end for valid timestamp")
+	}
+}
+
+func TestMapToSpec_MaintenanceFlowsToServer(t *testing.T) {
+	dc := DataCenterResult{
+		Name:  "colo",
+		OrbID: "colo:colo-galleon",
+		Servers: []ServerResult{{
+			Hostname:   "host",
+			ServiceTag: "TAG-A",
+			OrbID:      "colo:srv-001",
+			ServerMaintenance: &ServerMaintenanceResult{
+				Enabled: ptrBool(true),
+				Reason:  ptrString("SSD replacement"),
+			},
+		}},
+	}
+	spec := mapToSpec(dc)
+	if len(spec.Servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(spec.Servers))
+	}
+	m := spec.Servers[0].Maintenance
+	if m == nil {
+		t.Fatal("expected non-nil maintenance on server spec")
+	}
+	if !m.Enabled {
+		t.Error("expected Enabled=true")
+	}
+	if m.Reason == nil || *m.Reason != "SSD replacement" {
+		t.Errorf("reason: got %v, want SSD replacement", m.Reason)
+	}
+}
+
+func TestMapToSpec_NilMaintenanceProducesNilField(t *testing.T) {
+	dc := DataCenterResult{
+		Name:  "colo",
+		OrbID: "colo:colo-galleon",
+		Servers: []ServerResult{{
+			Hostname:          "host",
+			ServiceTag:        "TAG-A",
+			OrbID:             "colo:srv-001",
+			ServerMaintenance: nil,
+		}},
+	}
+	spec := mapToSpec(dc)
+	if len(spec.Servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(spec.Servers))
+	}
+	if spec.Servers[0].Maintenance != nil {
+		t.Errorf("expected nil maintenance for nil server maintenance, got %+v", spec.Servers[0].Maintenance)
+	}
+}
