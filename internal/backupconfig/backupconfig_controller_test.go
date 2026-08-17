@@ -762,4 +762,206 @@ func TestBuildEtcdCronJob_PruneAndConcurrency(t *testing.T) {
 	if got := envValue(writer.Env, "RETAIN_PER_DAY"); got != "5" {
 		t.Errorf("RETAIN_PER_DAY env = %q, want 5", got)
 	}
+	// Day-level GC is now a separate CronJob 
+	// age-based prune logic.
+	if strings.Contains(script, "RETENTION_DAYS") {
+		t.Error("snapshot writer must NOT contain RETENTION_DAYS (day-level GC moved to separate CronJob)")
+	}
+	// Snapshot job must run on the control-plane node (needs local etcd access).
+	if !cj.Spec.JobTemplate.Spec.Template.Spec.HostNetwork {
+		t.Error("snapshot CronJob must use hostNetwork to reach local etcd")
+	}
+}
+
+func TestBuildEtcdGCCronJob_Shape(t *testing.T) {
+	retainDays := 30
+	enabled := true
+	p := etcdGCCronJobParams{
+		Name:             "colo-dev-main-backup-etcd-gc",
+		Namespace:        "kube-system",
+		StorageAccount:   "stgalbackupsdevccwus01",
+		StorageContainer: "etcd",
+		BlobPrefix:       "colo/dev-main",
+		UploadImage:      "azure-cli:2.67.0",
+		CredentialSecret: "az-storage-creds",
+		RetainDays:       retainDays,
+		Schedule:         "0 0 * * *",
+		TimeZone:         "America/Los_Angeles",
+		Block:            &armadav1.EtcdBackupSpec{Enabled: &enabled, RetentionDays: &retainDays},
+	}
+	cj := buildEtcdGCCronJob(p)
+
+	if cj.Spec.ConcurrencyPolicy != batchv1.ForbidConcurrent {
+		t.Errorf("ConcurrencyPolicy = %q, want Forbid", cj.Spec.ConcurrencyPolicy)
+	}
+	if cj.Spec.Schedule != "0 0 * * *" {
+		t.Errorf("Schedule = %q, want 0 0 * * *", cj.Spec.Schedule)
+	}
+	if cj.Spec.TimeZone == nil || *cj.Spec.TimeZone != "America/Los_Angeles" {
+		t.Errorf("TimeZone = %v, want America/Los_Angeles", cj.Spec.TimeZone)
+	}
+	// GC job must NOT use hostNetwork — it only calls Azure Blob APIs.
+	if cj.Spec.JobTemplate.Spec.Template.Spec.HostNetwork {
+		t.Error("GC CronJob must NOT use hostNetwork (no etcd access needed)")
+	}
+	// GC job must NOT have an initContainer — no etcdctl needed.
+	if len(cj.Spec.JobTemplate.Spec.Template.Spec.InitContainers) != 0 {
+		t.Errorf("GC CronJob must have no initContainers, got %d", len(cj.Spec.JobTemplate.Spec.Template.Spec.InitContainers))
+	}
+	containers := cj.Spec.JobTemplate.Spec.Template.Spec.Containers
+	if len(containers) != 1 || containers[0].Name != etcdGCContainerName {
+		t.Errorf("GC CronJob must have exactly one container named %q, got %+v", etcdGCContainerName, containers)
+	}
+	gc := containers[0]
+	if got := envValue(gc.Env, "RETAIN_DAYS"); got != "30" {
+		t.Errorf("RETAIN_DAYS env = %q, want 30", got)
+	}
+	if got := envValue(gc.Env, "STORAGE_ACCOUNT"); got != "stgalbackupsdevccwus01" {
+		t.Errorf("STORAGE_ACCOUNT env = %q, want stgalbackupsdevccwus01", got)
+	}
+	if got := envValue(gc.Env, "BLOB_PREFIX"); got != "colo/dev-main" {
+		t.Errorf("BLOB_PREFIX env = %q, want colo/dev-main", got)
+	}
+	script := gc.Command[2]
+	if !strings.Contains(script, "RETAIN_DAYS") {
+		t.Error("GC script must reference RETAIN_DAYS")
+	}
+	if !strings.Contains(script, "storage blob delete") {
+		t.Error("GC script must contain blob delete logic")
+	}
+	if !strings.Contains(script, "$BLOB_PREFIX") {
+		t.Error("GC script must be scoped to $BLOB_PREFIX (this cluster's folder only)")
+	}
+}
+
+func TestReconcile_CreatesGCCronJob_WhenRetentionDaysSet(t *testing.T) {
+	retainDays := 30
+	bc := &armadav1.BackupConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "with-retention"},
+		Spec: armadav1.BackupConfigSpec{
+			OrbID:        "colo:with-retention",
+			ClusterOrbID: "colo:cluster",
+			Etcd: &armadav1.EtcdBackupSpec{
+				OrbID:         "colo:etcd",
+				Enabled:       ptr.To(true),
+				Schedule:      ptr.To("0 3 * * *"),
+				Location:      ptr.To("https://teststorage.blob.core.windows.net/etcd-backups/colo/cluster-001"),
+				RetentionDays: &retainDays,
+			},
+		},
+	}
+	r, c := newReconciler(t, bc)
+	r.EtcdGCSchedule = "0 0 * * *"
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: bc.Name},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// Snapshot CronJob exists.
+	var snapshotCJ batchv1.CronJob
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: testEtcdNs, Name: etcdCronJobName(bc),
+	}, &snapshotCJ); err != nil {
+		t.Fatalf("get snapshot cronjob: %v", err)
+	}
+
+	// GC CronJob created with correct shape.
+	var gcCJ batchv1.CronJob
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: testEtcdNs, Name: etcdGCCronJobName(bc),
+	}, &gcCJ); err != nil {
+		t.Fatalf("get gc cronjob: %v", err)
+	}
+	if gcCJ.Spec.Schedule != "0 0 * * *" {
+		t.Errorf("gc schedule = %q, want 0 0 * * *", gcCJ.Spec.Schedule)
+	}
+	gcContainers := gcCJ.Spec.JobTemplate.Spec.Template.Spec.Containers
+	if len(gcContainers) != 1 || gcContainers[0].Name != etcdGCContainerName {
+		t.Errorf("gc container = %+v, want single %q container", gcContainers, etcdGCContainerName)
+	}
+	if got := envValue(gcContainers[0].Env, "RETAIN_DAYS"); got != "30" {
+		t.Errorf("gc RETAIN_DAYS = %q, want 30", got)
+	}
+	// GC CronJob must carry a BackupConfig OwnerReference so BC deletion
+	// cascades to both CronJobs.
+	if !hasControllerOwnerRef(gcCJ.OwnerReferences, "BackupConfig", bc.Name) {
+		t.Errorf("gc CronJob missing BackupConfig OwnerReference; refs = %+v", gcCJ.OwnerReferences)
+	}
+}
+
+func TestReconcile_NoGCCronJob_WhenRetentionDaysNil(t *testing.T) {
+	bc := sampleBackupConfig() // retentionDays not set
+	r, c := newReconciler(t, bc)
+	r.EtcdGCSchedule = "0 0 * * *"
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: bc.Name},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	var gcCJ batchv1.CronJob
+	err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: testEtcdNs, Name: etcdGCCronJobName(bc),
+	}, &gcCJ)
+	if err == nil {
+		t.Error("expected no GC CronJob when retentionDays is nil, but one was created")
+	}
+}
+
+func TestReconcile_DeletesGCCronJob_WhenRetentionDaysCleared(t *testing.T) {
+	retainDays := 30
+	bc := &armadav1.BackupConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "retention-cleared"},
+		Spec: armadav1.BackupConfigSpec{
+			OrbID:        "colo:retention-cleared",
+			ClusterOrbID: "colo:cluster",
+			Etcd: &armadav1.EtcdBackupSpec{
+				OrbID:         "colo:etcd",
+				Enabled:       ptr.To(true),
+				Schedule:      ptr.To("0 3 * * *"),
+				Location:      ptr.To("https://teststorage.blob.core.windows.net/etcd-backups/colo/cluster-001"),
+				RetentionDays: &retainDays,
+			},
+		},
+	}
+	r, c := newReconciler(t, bc)
+	r.EtcdGCSchedule = "0 0 * * *"
+
+	// First reconcile: GC CronJob is created.
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: bc.Name},
+	}); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	var gcCJ batchv1.CronJob
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: testEtcdNs, Name: etcdGCCronJobName(bc),
+	}, &gcCJ); err != nil {
+		t.Fatalf("get gc cronjob after first reconcile: %v", err)
+	}
+
+	// Re-fetch before update so the resource version is current.
+	if err := c.Get(context.Background(), types.NamespacedName{Name: bc.Name}, bc); err != nil {
+		t.Fatalf("re-fetch bc: %v", err)
+	}
+	bc.Spec.Etcd.RetentionDays = nil
+	if err := c.Update(context.Background(), bc); err != nil {
+		t.Fatalf("update bc: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: bc.Name},
+	}); err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+
+	// GC CronJob must be deleted.
+	err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: testEtcdNs, Name: etcdGCCronJobName(bc),
+	}, &gcCJ)
+	if err == nil {
+		t.Error("expected GC CronJob to be deleted after retentionDays cleared, but it still exists")
+	}
 }

@@ -61,6 +61,10 @@ type Config struct {
 	// TimeZone is the IANA tz for the etcd CronJob schedule. Empty = UTC.
 	TimeZone string `envconfig:"ETCD_BACKUP_TIMEZONE" default:""`
 
+	// EtcdGCSchedule is the cron schedule for the day-level GC CronJob. Only
+	// consulted when the BackupConfig CR has spec.etcd.retentionDays set.
+	EtcdGCSchedule string `envconfig:"ETCD_GC_SCHEDULE" default:"0 0 * * *"`
+
 	// ObserveInterval is how often the controller re-polls Velero Schedule and
 	// the etcd CronJob for each CR independent of CR spec changes. Drives
 	// drift-detection metrics. Zero (the default, which keeps `go run` safe
@@ -188,6 +192,7 @@ func main() {
 		CredentialSecret:            cfg.CredentialSecret,
 		EtcdRetainPerDay:            cfg.RetainPerDay,
 		EtcdBackupTimeZone:          cfg.TimeZone,
+		EtcdGCSchedule:              cfg.EtcdGCSchedule,
 		ObserveInterval:             cfg.ObserveInterval,
 		VeleroS3URL:                 cfg.VeleroS3URL,
 		VeleroS3Region:              cfg.VeleroS3Region,
