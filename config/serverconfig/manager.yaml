@@ -17,6 +17,11 @@ data:
   # Create the Secret out-of-band — never committed. See docs/edge-deploy.md.
   credentialsNamespace: "configbundle-system"
   credentialsSecret: "idrac-credentials"
+  # Name of the KubernetesCluster (Orbital ConfigItem.name) this sc-controller
+  # instance is deployed on. Must match the serverconfig.armada.ai/cluster-name
+  # label stamped by cb-controller. Used to filter the ServerConfig watch to
+  # only servers belonging to this cluster.
+  clusterName: "UNSET"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -95,6 +100,11 @@ spec:
         # change), independent of CR changes. Empty/unset = disabled
         # (event-driven only) — safe for local `go run`. Aggressive values cost
         # iDRAC load; 1-5min is the conventional band.
+        - name: CLUSTER_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: serverconfig-controller-config
+              key: clusterName
         - name: IDRAC_OBSERVE_INTERVAL
           value: "1m"
         ports:

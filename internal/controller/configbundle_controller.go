@@ -266,6 +266,17 @@ func (r *ConfigBundleReconciler) applyServerConfig(ctx context.Context, cb *arma
 	if server.Hostname != nil {
 		hostname = *server.Hostname
 	}
+	labels := map[string]string{}
+	annotations := map[string]string{}
+	if server.KubernetesNode != nil {
+		if server.KubernetesNode.ClusterName != "" {
+			labels[armadav1.LabelCluster] = server.KubernetesNode.ClusterName
+		}
+		if server.KubernetesNode.ClusterOrbID != "" {
+			annotations[armadav1.AnnotationClusterOrbID] = server.KubernetesNode.ClusterOrbID
+		}
+	}
+
 	// ServerConfig is cluster-scoped — no namespace in metadata.
 	sc := &armadav1.ServerConfig{
 		TypeMeta: metav1.TypeMeta{
@@ -273,15 +284,18 @@ func (r *ConfigBundleReconciler) applyServerConfig(ctx context.Context, cb *arma
 			Kind:       "ServerConfig",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: strings.ToLower(hostname),
+			Name:        strings.ToLower(hostname),
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: armadav1.ServerConfigSpec{
-			OrbID:         server.OrbID,
-			ServiceTag:    server.ServiceTag,
-			Hostname:      server.Hostname,
-			OobIP:         server.OobIP,
-			IdracSettings: server.IdracSettings,
-			Maintenance:   server.Maintenance,
+			OrbID:          server.OrbID,
+			ServiceTag:     server.ServiceTag,
+			Hostname:       server.Hostname,
+			OobIP:          server.OobIP,
+			IdracSettings:  server.IdracSettings,
+			KubernetesNode: server.KubernetesNode,
+			Maintenance:    server.Maintenance,
 		},
 	}
 

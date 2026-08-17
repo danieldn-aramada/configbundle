@@ -13,3 +13,4 @@ resources:
 
 patches:
 - path: bc_observe_patch.yaml
+- path: sc_cluster_patch.yaml

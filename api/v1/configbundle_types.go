@@ -125,6 +125,12 @@ type ServerSpec struct {
 	// +optional
 	IdracSettings IdracSettingsSpec `json:"idracSettings,omitempty"`
 
+	// KubernetesNode describes the K8s node this server maps to in the cluster
+	// this controller is deployed on. Sourced from Orbital's kubernetesNode edge.
+	// Nil means the server is not a node in this cluster.
+	// +optional
+	KubernetesNode *KubernetesNodeSpec `json:"kubernetesNode,omitempty"`
+
 	// Maintenance controls when the sc-controller may enter the maintenance sequence.
 	// Written by configbundle-controller from Orbital. local:admin may SSA-override.
 	// Nil and enabled:false are both treated as "no maintenance."

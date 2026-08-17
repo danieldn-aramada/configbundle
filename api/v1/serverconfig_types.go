@@ -20,6 +20,56 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	// LabelCluster is the label key stamped on ServerConfig CRs to identify the
+	// Kubernetes cluster the server belongs to. Value is KubernetesCluster.name
+	// from Orbital. Used by sc-controller to filter its watch to local servers only.
+	LabelCluster = "serverconfig.armada.ai/cluster-name"
+
+	// AnnotationClusterOrbID is the annotation key carrying the full Orbital orbId
+	// of the owning KubernetesCluster (e.g. "alaska-dot:eksa-cluster-colo-galleon").
+	// Stable identity; label carries the human-readable name for kubectl filtering.
+	AnnotationClusterOrbID = "serverconfig.armada.ai/cluster-orb-id"
+)
+
+// NodeRole mirrors KubernetesNode.role values in Orbital's DGraph schema.
+// +kubebuilder:validation:Enum=control_plane;worker
+type NodeRole string
+
+const (
+	NodeRoleControlPlane NodeRole = "control_plane"
+	NodeRoleWorker       NodeRole = "worker"
+)
+
+// KubernetesNodeSpec describes the K8s node this server maps to within the
+// cluster this controller is deployed on. Sourced from Orbital's kubernetesNode
+// edge on Server. Nil = server is not a node in this cluster; sc-controller
+// skips maintenance for this CR.
+type KubernetesNodeSpec struct {
+	// Name is the K8s node name (e.g. "dev-main-cp9-7"). Distinct from
+	// spec.hostname which carries Orbital's server hostname (e.g. "r09-u02.colo-galleon").
+	// +optional
+	Name *string `json:"name,omitempty"`
+
+	// Role is this node's role in the cluster.
+	// +kubebuilder:validation:Enum=control_plane;worker
+	// +optional
+	Role NodeRole `json:"role,omitempty"`
+
+	// ClusterName is the human-readable name of the owning KubernetesCluster from
+	// Orbital (KubernetesCluster.name via ConfigItem). Mirrored on the ServerConfig
+	// label serverconfig.armada.ai/cluster for kubectl filtering and sc-controller
+	// watch scoping.
+	// +optional
+	ClusterName string `json:"clusterName,omitempty"`
+
+	// ClusterOrbID is the full Orbital orbId of the owning KubernetesCluster
+	// (e.g. "alaska-dot:eksa-cluster-colo-galleon"). Immutable stable identity;
+	// mirrored on the annotation serverconfig.armada.ai/cluster-orb-id.
+	// +optional
+	ClusterOrbID string `json:"clusterOrbId,omitempty"`
+}
+
 // MaintenancePhase is the current phase of the maintenance sequence.
 // +kubebuilder:validation:Enum=Draining;Active;Restoring;Done;Failed
 type MaintenancePhase string
@@ -105,6 +155,12 @@ type MaintenanceStatus struct {
 	// +optional
 	PendingPods []string `json:"pendingPods,omitempty"`
 
+	// BlockedReason is set when a pre-drain eligibility check fails (e.g. EtcdQuorumRisk,
+	// InsufficientCapacity). Cleared when all checks pass. Does not set phase=Failed --
+	// that is reserved for runtime failures like drain timeout.
+	// +optional
+	BlockedReason *string `json:"blockedReason,omitempty"`
+
 	// LastError is the most recent reconcile error, if any.
 	// +optional
 	LastError *string `json:"lastError,omitempty"`
@@ -154,6 +210,12 @@ type ServerConfigSpec struct {
 	// Server.idracSettings edge.
 	// +optional
 	IdracSettings IdracSettingsSpec `json:"idracSettings,omitempty"`
+
+	// KubernetesNode describes the K8s node this server maps to in the cluster
+	// this controller is deployed on. Sourced from Orbital's kubernetesNode edge.
+	// Nil means the server is not a node in this cluster — sc-controller skips maintenance.
+	// +optional
+	KubernetesNode *KubernetesNodeSpec `json:"kubernetesNode,omitempty"`
 
 	// Maintenance controls when the controller may enter the maintenance sequence.
 	// Written by configbundle-controller from Orbital. local:admin may SSA-override.

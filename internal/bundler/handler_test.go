@@ -756,3 +756,136 @@ func TestMapToSpec_NilMaintenanceProducesNilField(t *testing.T) {
 		t.Errorf("expected nil maintenance for nil server maintenance, got %+v", spec.Servers[0].Maintenance)
 	}
 }
+
+func TestMapKubernetesNode_NilReturnsNil(t *testing.T) {
+	if got := mapKubernetesNode(nil); got != nil {
+		t.Errorf("expected nil for nil input, got %+v", got)
+	}
+}
+
+func TestMapKubernetesNode_NilNameReturnsNil(t *testing.T) {
+	src := &KubernetesNodeResult{Name: nil, Role: ptrString("worker")}
+	if got := mapKubernetesNode(src); got != nil {
+		t.Errorf("expected nil when name is nil, got %+v", got)
+	}
+}
+
+func TestMapKubernetesNode_NameAndRoleFlowThrough(t *testing.T) {
+	src := &KubernetesNodeResult{Name: ptrString("dev-main-cp9-7"), Role: ptrString("control_plane")}
+	got := mapKubernetesNode(src)
+	if got == nil {
+		t.Fatal("expected non-nil KubernetesNodeSpec")
+	}
+	if got.Name == nil || *got.Name != "dev-main-cp9-7" {
+		t.Errorf("expected name=dev-main-cp9-7, got %v", got.Name)
+	}
+	if got.Role != armadav1.NodeRoleControlPlane {
+		t.Errorf("expected role=control_plane, got %q", got.Role)
+	}
+}
+
+func TestMapKubernetesNode_ClusterFieldsFlowThrough(t *testing.T) {
+	src := &KubernetesNodeResult{
+		Name: ptrString("dev-main-cp9-7"),
+		Role: ptrString("control_plane"),
+		Cluster: &KubernetesClusterNodeResult{
+			OrbID: "colo:eksa-cluster-colo-dev-main",
+			Name:  "colo-dev-main",
+		},
+	}
+	got := mapKubernetesNode(src)
+	if got == nil {
+		t.Fatal("expected non-nil KubernetesNodeSpec")
+	}
+	if got.ClusterName != "colo-dev-main" {
+		t.Errorf("expected ClusterName=colo-dev-main, got %q", got.ClusterName)
+	}
+	if got.ClusterOrbID != "colo:eksa-cluster-colo-dev-main" {
+		t.Errorf("expected ClusterOrbID=colo:eksa-cluster-colo-dev-main, got %q", got.ClusterOrbID)
+	}
+}
+
+func TestMapKubernetesNode_NilClusterProducesEmptyFields(t *testing.T) {
+	src := &KubernetesNodeResult{Name: ptrString("dev-main-cp9-7"), Role: ptrString("worker"), Cluster: nil}
+	got := mapKubernetesNode(src)
+	if got == nil {
+		t.Fatal("expected non-nil KubernetesNodeSpec")
+	}
+	if got.ClusterName != "" {
+		t.Errorf("expected empty ClusterName for nil cluster, got %q", got.ClusterName)
+	}
+	if got.ClusterOrbID != "" {
+		t.Errorf("expected empty ClusterOrbID for nil cluster, got %q", got.ClusterOrbID)
+	}
+}
+
+func TestMapKubernetesNode_NilRoleProducesEmptyRole(t *testing.T) {
+	src := &KubernetesNodeResult{Name: ptrString("dev-main-wk9-6"), Role: nil}
+	got := mapKubernetesNode(src)
+	if got == nil {
+		t.Fatal("expected non-nil KubernetesNodeSpec")
+	}
+	if got.Role != "" {
+		t.Errorf("expected empty role for nil source role, got %q", got.Role)
+	}
+}
+
+func TestMapToSpec_KubernetesNodeFlowsToServer(t *testing.T) {
+	dc := DataCenterResult{
+		Name:  "colo",
+		OrbID: "colo:colo-galleon",
+		Servers: []ServerResult{{
+			Hostname:   "r09-u02.colo-galleon",
+			ServiceTag: "CWJHDX3",
+			OrbID:      "colo:CWJHDX3",
+			KubernetesNode: &KubernetesNodeResult{
+				Name: ptrString("dev-main-cp9-7"),
+				Role: ptrString("control_plane"),
+				Cluster: &KubernetesClusterNodeResult{
+					OrbID: "colo:eksa-cluster-colo-dev-main",
+					Name:  "colo-dev-main",
+				},
+			},
+		}},
+	}
+	spec := mapToSpec(dc)
+	if len(spec.Servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(spec.Servers))
+	}
+	node := spec.Servers[0].KubernetesNode
+	if node == nil {
+		t.Fatal("expected non-nil KubernetesNode on server spec")
+	}
+	if node.Name == nil || *node.Name != "dev-main-cp9-7" {
+		t.Errorf("expected node name=dev-main-cp9-7, got %v", node.Name)
+	}
+	if node.Role != armadav1.NodeRoleControlPlane {
+		t.Errorf("expected role=control_plane, got %q", node.Role)
+	}
+	if node.ClusterName != "colo-dev-main" {
+		t.Errorf("expected ClusterName=colo-dev-main, got %q", node.ClusterName)
+	}
+	if node.ClusterOrbID != "colo:eksa-cluster-colo-dev-main" {
+		t.Errorf("expected ClusterOrbID=colo:eksa-cluster-colo-dev-main, got %q", node.ClusterOrbID)
+	}
+}
+
+func TestMapToSpec_NilKubernetesNodeProducesNilField(t *testing.T) {
+	dc := DataCenterResult{
+		Name:  "colo",
+		OrbID: "colo:colo-galleon",
+		Servers: []ServerResult{{
+			Hostname:       "r09-u04.colo-galleon",
+			ServiceTag:     "BFRHDX3",
+			OrbID:          "colo:BFRHDX3",
+			KubernetesNode: nil,
+		}},
+	}
+	spec := mapToSpec(dc)
+	if len(spec.Servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(spec.Servers))
+	}
+	if spec.Servers[0].KubernetesNode != nil {
+		t.Errorf("expected nil KubernetesNode for nil source, got %+v", spec.Servers[0].KubernetesNode)
+	}
+}

@@ -103,7 +103,24 @@ type ServerResult struct {
 	OrbID             string                   `json:"orbId"`
 	OobIP             *IPAddressResult         `json:"oobIP"`
 	IdracSettings     *IdracSettingsResult     `json:"idracSettings"`
+	KubernetesNode    *KubernetesNodeResult    `json:"kubernetesNode"`
 	ServerMaintenance *ServerMaintenanceResult `json:"serverMaintenance"`
+}
+
+// KubernetesNodeResult is the GraphQL response shape for a KubernetesNode node.
+// name comes from ConfigItem; role carries "control_plane" or "worker".
+// Cluster carries the owning cluster's identity (orbId + name via ConfigItem fragment).
+type KubernetesNodeResult struct {
+	Name    *string                      `json:"name"`
+	Role    *string                      `json:"role"`
+	Cluster *KubernetesClusterNodeResult `json:"cluster"`
+}
+
+// KubernetesClusterNodeResult holds the cluster identity fields fetched via a
+// ConfigItem inline fragment on the KubernetesCluster interface edge.
+type KubernetesClusterNodeResult struct {
+	OrbID string `json:"orbId"`
+	Name  string `json:"name"`
 }
 
 // ServerMaintenanceResult is the GraphQL response shape for a ServerMaintenance
@@ -175,6 +192,16 @@ query ConfigBundleByOrbID($orbId: String!) {
         usbManagementPortEnabled
         dhcpEnabled
         racadmEnabled
+      }
+      kubernetesNode {
+        name
+        role
+        cluster {
+          ... on ConfigItem {
+            orbId
+            name
+          }
+        }
       }
       serverMaintenance {
         enabled

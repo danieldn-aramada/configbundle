@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: configbundle-serverconfig-controller-config
+  namespace: configbundle-system
+data:
+  clusterName: "dev-main"

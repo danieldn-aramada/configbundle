@@ -162,6 +162,23 @@ up: ## Start minikube and install CRDs — ready for 'make run-controller'.
 down: ## Stop minikube.
 	minikube stop
 
+KIND_DEV_CLUSTER ?= configbundle-dev
+
+.PHONY: kind-up
+kind-up: ## Start a 3-node kind cluster (1 CP + 2 workers) and install CRDs — for maintenance mode testing.
+	@$(KIND) get clusters 2>/dev/null | grep -q "^$(KIND_DEV_CLUSTER)$$" \
+		&& echo "kind cluster '$(KIND_DEV_CLUSTER)' already running" \
+		|| $(KIND) create cluster --name $(KIND_DEV_CLUSTER) --config hack/kind-dev.yaml
+	@$(MAKE) install
+	@echo ""
+	@echo "kind cluster '$(KIND_DEV_CLUSTER)' ready (1 CP + 2 workers)."
+	@echo "  kubectl get nodes"
+	@echo "  make run-controller"
+
+.PHONY: kind-down
+kind-down: ## Delete the kind dev cluster.
+	$(KIND) delete cluster --name $(KIND_DEV_CLUSTER)
+
 .PHONY: run-controller
 run-controller: ## Run the cb-controller from your host (set NAMESPACE=default for local testing).
 	go run ./cmd/controller/main.go

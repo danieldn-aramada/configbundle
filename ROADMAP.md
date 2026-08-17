@@ -2,11 +2,11 @@
 
 ## Recent accomplishments
 
+- **2026-08-17** — ServerConfig cluster identity: `clusterName`/`clusterOrbId` in bundler pipeline; `serverconfig.armada.ai/cluster-name` label + `cluster-orb-id` annotation stamped by cb-controller; `CLUSTER_NAME` env var on sc-controller; dev-main kustomize overlay wired
+- **2026-08-14** — Maintenance mode design finalized (all open Qs resolved, EKSA/CAPI MHC verified from source); kubernetesNode bundler pipeline (NodeRole + KubernetesNodeSpec, GraphQL query, mapKubernetesNode) shipped and e2e verified on colo-galleon (30/50 servers populated)
 - **2026-08-13** — Maintenance mode foundation: MaintenanceSpec/Status CRD types; bundler maps serverMaintenance from Orbital GraphQL; configbundle-controller propagates to ServerConfig CRs; e2e validated on colo-galleon
 - **2026-07-27** — retentionDays e2e on colo-dev-main (etcd CronJob RETENTION_DAYS=7, Velero TTL=312h); `orbital.armada.ai/cluster-orb-id` annotation on Schedule; `lastAppliedVersion` on CB status; controller/v0.0.5 + backupconfig/v0.0.5 deployed
 - **2026-07-24** — Velero BSL auto-provisioning (PR #4); retentionDays on etcd+velero (TTL + age-prune); bundler JSON round-trip for zero-touch field mapping; backupconfig/v0.0.5 on colo-dev-main
-- **2026-07-13** — Domain-controller metrics reshaped to alertable-projection model: info metrics dropped (observed state → `.status`), `ssh_enabled` promoted, `oob_ip`+`orb_id` identity labels, reconcile trio backbone; `ControllerDown` alerts + local `make monitoring-up` Prometheus rig; minikube-validated e2e
-- **2026-07-07** — bc-controller sub-resource hygiene: etcd CronJob renamed `-etcd` (parallel to `-velero`), OwnerReferences on both for cascade GC, reconcile refactored to always-SSA-apply (drop pre-diff-gate anti-pattern); ServiceMonitor overlay for cb + sc under `config/prometheus/`
 ## Development Timeline
 
 ```mermaid

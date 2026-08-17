@@ -216,6 +216,9 @@ func mapToSpec(dc DataCenterResult) armadav1.ConfigBundleSpec {
 		if s.IdracSettings != nil {
 			srv.IdracSettings = mapIdrac(s.IdracSettings)
 		}
+		if s.KubernetesNode != nil {
+			srv.KubernetesNode = mapKubernetesNode(s.KubernetesNode)
+		}
 		if s.ServerMaintenance != nil {
 			srv.Maintenance = mapMaintenance(s.ServerMaintenance)
 		}
@@ -250,6 +253,28 @@ func mapIdrac(src *IdracSettingsResult) armadav1.IdracSettingsSpec {
 		return dst
 	}
 	json.Unmarshal(b, &dst)
+	return dst
+}
+
+// mapKubernetesNode translates a KubernetesNodeResult from Orbital into a
+// KubernetesNodeSpec. The cluster edge is a nested object in GraphQL but is
+// flattened to ClusterName/ClusterOrbID scalars on the spec, so explicit field
+// mapping is required instead of a JSON round-trip.
+// Returns nil when the source has no name (node not yet assigned).
+func mapKubernetesNode(src *KubernetesNodeResult) *armadav1.KubernetesNodeSpec {
+	if src == nil || src.Name == nil {
+		return nil
+	}
+	dst := &armadav1.KubernetesNodeSpec{
+		Name: src.Name,
+	}
+	if src.Role != nil {
+		dst.Role = armadav1.NodeRole(*src.Role)
+	}
+	if src.Cluster != nil {
+		dst.ClusterName = src.Cluster.Name
+		dst.ClusterOrbID = src.Cluster.OrbID
+	}
 	return dst
 }
 

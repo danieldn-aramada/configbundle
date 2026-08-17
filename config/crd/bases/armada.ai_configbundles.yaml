@@ -277,6 +277,41 @@ spec:
                       required:
                       - orbId
                       type: object
+                    kubernetesNode:
+                      description: |-
+                        KubernetesNode describes the K8s node this server maps to in the cluster
+                        this controller is deployed on. Sourced from Orbital's kubernetesNode edge.
+                        Nil means the server is not a node in this cluster.
+                      properties:
+                        clusterName:
+                          description: |-
+                            ClusterName is the human-readable name of the owning KubernetesCluster from
+                            Orbital (KubernetesCluster.name via ConfigItem). Mirrored on the ServerConfig
+                            label serverconfig.armada.ai/cluster for kubectl filtering and sc-controller
+                            watch scoping.
+                          type: string
+                        clusterOrbId:
+                          description: |-
+                            ClusterOrbID is the full Orbital orbId of the owning KubernetesCluster
+                            (e.g. "alaska-dot:eksa-cluster-colo-galleon"). Immutable stable identity;
+                            mirrored on the annotation serverconfig.armada.ai/cluster-orb-id.
+                          type: string
+                        name:
+                          description: |-
+                            Name is the K8s node name (e.g. "dev-main-cp9-7"). Distinct from
+                            spec.hostname which carries Orbital's server hostname (e.g. "r09-u02.colo-galleon").
+                          type: string
+                        role:
+                          allOf:
+                          - enum:
+                            - control_plane
+                            - worker
+                          - enum:
+                            - control_plane
+                            - worker
+                          description: Role is this node's role in the cluster.
+                          type: string
+                      type: object
                     maintenance:
                       description: |-
                         Maintenance controls when the sc-controller may enter the maintenance sequence.

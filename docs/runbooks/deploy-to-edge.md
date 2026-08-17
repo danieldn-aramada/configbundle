@@ -30,6 +30,10 @@ Also required (assumed already in place):
 - **orb** Service reachable as `orb:8010` from inside the namespace.
 - **ACR pull secret** in `configbundle-system` (site-specific Deployment patch).
 
+## Set cluster name (one-time, per site)
+
+sc-controller must know which cluster it is deployed on so it only reconciles its own ServerConfigs. Set `clusterName` in the site overlay (e.g. `config/overlays/dev-main/sc_cluster_patch.yaml`) to the exact `KubernetesCluster.name` value from Orbital — this is what cb-controller stamps on the `serverconfig.armada.ai/cluster-name` label. Default is `"UNSET"`, which matches no ServerConfig.
+
 ## Tune the allowlist (one-time, per site)
 
 Edit `config/serverconfig/controller_config.yaml` in this repo:

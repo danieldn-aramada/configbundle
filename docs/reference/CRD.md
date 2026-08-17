@@ -24,6 +24,7 @@ configbundle defines `ConfigBundle` and `ServerConfig` CRDs in `api/v1/`. The Co
 - **ConfigBundle and ServerConfig are cluster-scoped; per-bundle ConfigMaps and Secrets stay namespaced.** cb-controller writes children to `CHILD_NAMESPACE` (default `configbundle-system`). Invariant: one ConfigBundle per datacenter per cluster. Not enforced by admission validation yet.
 - **Every level that orbital identifies as a ConfigItem carries its own `OrbID` field on the CRD type** (e.g. `IdracSpec.OrbID`). Bundler queries orbital and populates; controller reads directly. New nested types (BIOS, NIC, ...) follow the same pattern.
 - **No mapping OCI layer, no path→orbId translation on the wire.** Do NOT reintroduce a separate mapping layer — an earlier design shipped one as a second OCI layer and produced a persistent 409 race (mapping dispatch arrived before `Status.LastAppliedDigest` was written). Saturating orbIds on the CR closes the race by deletion.
+- **ServerConfig cluster identity uses two keys: label + annotation.** `serverconfig.armada.ai/cluster-name=<KubernetesCluster.name>` for kubectl filtering and sc-controller watch scoping; `serverconfig.armada.ai/cluster-orb-id=<full-orbId>` annotation for stable cross-boundary identity. Do NOT use only the annotation — it is not filterable via label selectors. Do NOT try to put the raw orbId in the label — colons are invalid in K8s label values.
 
 ---
 
