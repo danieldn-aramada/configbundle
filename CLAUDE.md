@@ -32,8 +32,8 @@
 ## Current State
 
 **Phase:** Prototype
-**Active work:** Monorepo consolidation complete. sc-controller and bc-controller sources are now folded into this repo under `cmd/{serverconfig,backupconfig}/` and `internal/{serverconfig,backupconfig}/`; the `replace ../configbundle` directives are gone. All four services (cb-controller, cb-bundler, sc-controller, bc-controller) ship from one Go module and one Dockerfile with four targets. Deploy is one `kubectl apply -k config/default/` — CRDs + 3 Deployments + per-controller RBAC. This follows the cert-manager / cluster-api pattern for related controllers with shared types.
-**Next priority:** Spike 8 (full pipeline e2e); PrometheusRule + Alertmanager wiring for drift gauges; orbital-side cleanup of orphan Ignore resolutions after edge handback.
+**Active work:** sc-controller maintenance state machine shipped (Checking → Active, eligibility checks, CLUSTER_NAME/MAINTENANCE_ENABLED env vars). ServerConfig status now carries `lastAppliedVersion` + `lastAppliedDigest` propagated from the parent ConfigBundle — ready to deploy to dev-main (CRD apply first). Change management design doc written at `.local/design-change-management.md` — Approach 2 (PIM gate + diff review + apply) chosen, aligned to Orbital Spike 30 preview endpoint; revert API gap flagged to Orbital session.
+**Next priority:** Deploy sc-controller maintenance + bundle provenance to dev-main; Orbital Spike 30 revert API scope confirmation; Spike 8 (full pipeline e2e).
 
 *Update this section at each session wrap-up.*
 

@@ -313,6 +313,19 @@ spec:
                   timestamp, no message. Nil = no successful reconcile yet.
                 format: date-time
                 type: string
+              lastAppliedDigest:
+                description: |-
+                  LastAppliedDigest is the immutable artifact manifest digest (X-Orb-Digest)
+                  of the ConfigBundle artifact whose spec produced the current state of this
+                  ServerConfig. Matches ConfigBundleStatus.LastAppliedDigest on the parent.
+                type: string
+              lastAppliedVersion:
+                description: |-
+                  LastAppliedVersion is the OCI tag (X-Orb-Tag) of the ConfigBundle artifact
+                  whose spec produced the current state of this ServerConfig. Matches
+                  ConfigBundleStatus.LastAppliedVersion on the parent ConfigBundle. Allows a
+                  reader to identify the source artifact without cross-referencing the parent.
+                type: string
               maintenance:
                 description: Maintenance reflects the current maintenance sequence
                   state.
@@ -356,6 +369,7 @@ spec:
                   phase:
                     description: Phase is the current phase of the maintenance sequence.
                     enum:
+                    - Checking
                     - Draining
                     - Active
                     - Restoring

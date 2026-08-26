@@ -410,3 +410,4 @@ Queries (paste into Grafana):
 - **Self-emit vs KSM-CRS is a genuine tradeoff** (no tri-state to lose once
   success is a boolean). A shared template presents both; configbundle's default
   is self-emit (in-repo, fed by the one live read).
+- **Child CRs carry `lastAppliedVersion` + `lastAppliedDigest` propagated from the parent ConfigBundle.** `writeStatus` looks up the owning ConfigBundle via ownerReference and copies both fields before every status update. Avoids cross-referencing the parent to identify the source artifact. Fields are empty until the first `writeStatus` call; `markReconcileSuccess` does not propagate (steady-state path, values persist from prior write).

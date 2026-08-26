@@ -193,6 +193,17 @@ type ServerConfigReconciler struct {
 	// for "what happened when," complete with TTL, dedup (count/lastTimestamp),
 	// and cross-resource correlation via involvedObject.
 	Recorder record.EventRecorder
+
+	// ClusterName is the name of the Kubernetes cluster this controller is
+	// deployed on (matches KubernetesCluster.name in Orbital). Used to scope
+	// the concurrent-maintenance check to sibling ServerConfigs in this cluster
+	// only. Set via CLUSTER_NAME env var; default "UNSET" matches nothing.
+	ClusterName string
+
+	// MaintenanceEnabled is the site-wide feature flag for the maintenance
+	// state machine. When false, spec.maintenance is ignored entirely.
+	// Set via MAINTENANCE_ENABLED env var; default false.
+	MaintenanceEnabled bool
 }
 
 func (r *ServerConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -223,6 +234,17 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		return reconcile.Result{}, err
 	}
 
+	// Maintenance state machine — runs independently of the iDRAC path.
+	// Feature-gated by MAINTENANCE_ENABLED env var (default false).
+	var maintResult ctrl.Result
+	if r.MaintenanceEnabled {
+		var err error
+		maintResult, err = r.reconcileMaintenance(ctx, &sc)
+		if err != nil {
+			return maintResult, err
+		}
+	}
+
 	// No oobIP means nothing actionable — surface the skip on status so
 	// `kubectl describe sc <name>` explains the blank live state.
 	if sc.Spec.OobIP == nil || *sc.Spec.OobIP == "" {
@@ -230,7 +252,7 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 			"serviceTag", sc.Spec.ServiceTag)
 		r.setStatusSkipped(ctx, &sc, "NoOobIP",
 			"spec.oobIP is empty — no target to reconcile against. Populate spec.oobIP to enable reconciliation.")
-		return reconcile.Result{}, nil
+		return mergeResult(maintResult, reconcile.Result{}), nil
 	}
 	oobIP := *sc.Spec.OobIP
 
@@ -246,7 +268,7 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 			"intent.ipmiEnabled", boolPtr(sc.Spec.IdracSettings.IPMIEnabled))
 		r.setStatusSkipped(ctx, &sc, "NotInOobAllowlist",
 			fmt.Sprintf("oobIP %s is not in IDRAC_OOB_ALLOWLIST — this ServerConfig is not managed by this controller instance.", oobIP))
-		return reconcile.Result{}, nil
+		return mergeResult(maintResult, reconcile.Result{}), nil
 	}
 
 	// Nothing reconcilable on this CR — either no intent set, or all intent
@@ -260,7 +282,7 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 			"policyBlocked", policyBlockedFields(sc.Spec.IdracSettings, r.AllowedFields))
 		r.setStatusSkipped(ctx, &sc, "NoManagedFields",
 			"no allowlisted iDRAC field has intent set — nothing to reconcile")
-		return reconcile.Result{}, nil
+		return mergeResult(maintResult, reconcile.Result{}), nil
 	}
 
 	// Load shared credentials.
@@ -275,12 +297,12 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 				"secret", r.CredentialsNamespace+"/"+r.CredentialsSecretName)
 			r.setStatusFailed(ctx, &sc, "MissingCredentials", err.Error())
 			recordReconcileError(sc.Name, oobIP, sc.Spec.OrbID, "MissingCredentials")
-			return reconcile.Result{RequeueAfter: 1 * time.Minute}, nil
+			return mergeResult(maintResult, reconcile.Result{RequeueAfter: 1 * time.Minute}), nil
 		}
 		logger.Error(err, "load iDRAC credentials")
 		r.setStatusFailed(ctx, &sc, "CredentialsLoadFailed", err.Error())
 		recordReconcileError(sc.Name, oobIP, sc.Spec.OrbID, "CredentialsLoadFailed")
-		return reconcile.Result{}, fmt.Errorf("load credentials: %w", err)
+		return mergeResult(maintResult, reconcile.Result{}), fmt.Errorf("load credentials: %w", err)
 	}
 
 	// Read live iDRAC attributes, compute deltas across every managed field.
@@ -290,7 +312,7 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		logger.Error(err, "read iDRAC Attributes", "oobIP", oobIP)
 		r.setStatusFailed(ctx, &sc, "RedfishReadFailed", err.Error())
 		recordReconcileError(sc.Name, oobIP, sc.Spec.OrbID, "RedfishReadFailed")
-		return reconcile.Result{}, fmt.Errorf("read Attributes from %s: %w", oobIP, err)
+		return mergeResult(maintResult, reconcile.Result{}), fmt.Errorf("read Attributes from %s: %w", oobIP, err)
 	}
 
 	// Promote the observed SSH-enabled state to a metric
@@ -328,14 +350,14 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 			r.markReconcileSuccess(ctx, &sc)
 		}
 		recordReconcileSuccess(sc.Name, oobIP, sc.Spec.OrbID, time.Now().Unix())
-		return reconcile.Result{RequeueAfter: r.ObserveInterval}, nil
+		return mergeResult(maintResult, reconcile.Result{RequeueAfter: r.ObserveInterval}), nil
 	}
 
 	if err := rc.PatchAttributes(ctx, deltas); err != nil {
 		logger.Error(err, "PATCH iDRAC attributes", "oobIP", oobIP, "updates", deltas)
 		r.setStatusFailed(ctx, &sc, "RedfishPatchFailed", err.Error())
 		recordReconcileError(sc.Name, oobIP, sc.Spec.OrbID, "RedfishPatchFailed")
-		return reconcile.Result{}, fmt.Errorf("PATCH attributes on %s: %w", oobIP, err)
+		return mergeResult(maintResult, reconcile.Result{}), fmt.Errorf("PATCH attributes on %s: %w", oobIP, err)
 	}
 	logger.Info("reconciled (PATCH applied)",
 		"oobIP", oobIP,
@@ -351,7 +373,7 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	r.Recorder.Eventf(&sc, corev1.EventTypeNormal, "Applied", patchMsg)
 	r.setStatusApplied(ctx, &sc)
 	recordReconcileSuccess(sc.Name, oobIP, sc.Spec.OrbID, time.Now().Unix())
-	return reconcile.Result{RequeueAfter: r.ObserveInterval}, nil
+	return mergeResult(maintResult, reconcile.Result{RequeueAfter: r.ObserveInterval}), nil
 }
 
 // formatDeltas renders a small map as a stable, human-readable string for
@@ -576,6 +598,17 @@ func (r *ServerConfigReconciler) markReconcileSuccess(ctx context.Context, sc *a
 	if err != nil {
 		logger.Info("reconcile-marker update failed (will retry next reconcile)", "err", err.Error())
 	}
+}
+
+// mergeResult returns whichever Result has the shorter effective requeue,
+// so that both the iDRAC and maintenance paths stay alive.
+func mergeResult(a, b ctrl.Result) ctrl.Result {
+	aSet := a.RequeueAfter > 0
+	bSet := b.RequeueAfter > 0
+	if aSet && (!bSet || a.RequeueAfter < b.RequeueAfter) {
+		return a
+	}
+	return b
 }
 
 func boolPtr(p *bool) string {

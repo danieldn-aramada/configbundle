@@ -405,7 +405,42 @@ func (s *ConsumeServer) applyManifest(ctx context.Context, body []byte, tag, dig
 			"reason", "Reconciled")
 	}
 
+	// Stamp bundle provenance on each child ServerConfig so readers can identify
+	// the source artifact without cross-referencing the parent ConfigBundle.
+	// Called after ConfigBundle status is updated so the version is authoritative.
+	// IgnoreNotFound for servers whose ServerConfig hasn't been created yet by
+	// ConfigBundleReconciler (new servers on first dispatch get it on the next one).
+	s.stampBundleProvenance(ctx, spec, tag, digest)
+
 	return nil
+}
+
+// stampBundleProvenance writes LastAppliedVersion and LastAppliedDigest onto
+// the Status of each ServerConfig child that already exists. Non-fatal: a
+// failed stamp is logged and skipped; the next dispatch will retry.
+func (s *ConsumeServer) stampBundleProvenance(ctx context.Context, spec armadav1.ConfigBundleSpec, tag, digest string) {
+	if tag == "" {
+		return
+	}
+	logger := log.FromContext(ctx).WithName("consume")
+	for _, server := range spec.Servers {
+		if server.Hostname == nil {
+			continue
+		}
+		name := strings.ToLower(*server.Hostname)
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			var sc armadav1.ServerConfig
+			if err := s.Client.Get(ctx, client.ObjectKey{Name: name}, &sc); err != nil {
+				return client.IgnoreNotFound(err)
+			}
+			sc.Status.LastAppliedVersion = tag
+			sc.Status.LastAppliedDigest = digest
+			return s.Client.Status().Update(ctx, &sc)
+		})
+		if err != nil {
+			logger.Info("stamp bundle provenance failed (non-fatal)", "serverConfig", name, "err", err.Error())
+		}
+	}
 }
 
 // parseManifest deserialises the ConfigBundle manifest YAML layer into a ConfigBundleSpec.

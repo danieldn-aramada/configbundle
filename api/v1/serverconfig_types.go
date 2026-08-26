@@ -71,11 +71,16 @@ type KubernetesNodeSpec struct {
 }
 
 // MaintenancePhase is the current phase of the maintenance sequence.
-// +kubebuilder:validation:Enum=Draining;Active;Restoring;Done;Failed
+// +kubebuilder:validation:Enum=Checking;Draining;Active;Restoring;Done;Failed
 type MaintenancePhase string
 
 const (
-	// MaintenancePhaseDraining: node is being cordoned and pods evicted.
+	// MaintenancePhaseChecking: maintenance requested; running eligibility checks.
+	// blockedReason is set if any check fails. Stays here until all checks pass.
+	// Distinct from no-phase (maintenance not requested) so operators can see
+	// "requested but blocked" vs "not requested."
+	MaintenancePhaseChecking MaintenancePhase = "Checking"
+	// MaintenancePhaseDraining: all checks passed; node is being cordoned and pods evicted.
 	MaintenancePhaseDraining MaintenancePhase = "Draining"
 	// MaintenancePhaseActive: node is safe for maintenance operations (cordon + drain complete).
 	MaintenancePhaseActive MaintenancePhase = "Active"
@@ -285,6 +290,19 @@ type ServerConfigStatus struct {
 	// Maintenance reflects the current maintenance sequence state.
 	// +optional
 	Maintenance *MaintenanceStatus `json:"maintenance,omitempty"`
+
+	// LastAppliedVersion is the OCI tag (X-Orb-Tag) of the ConfigBundle artifact
+	// whose spec produced the current state of this ServerConfig. Matches
+	// ConfigBundleStatus.LastAppliedVersion on the parent ConfigBundle. Allows a
+	// reader to identify the source artifact without cross-referencing the parent.
+	// +optional
+	LastAppliedVersion string `json:"lastAppliedVersion,omitempty"`
+
+	// LastAppliedDigest is the immutable artifact manifest digest (X-Orb-Digest)
+	// of the ConfigBundle artifact whose spec produced the current state of this
+	// ServerConfig. Matches ConfigBundleStatus.LastAppliedDigest on the parent.
+	// +optional
+	LastAppliedDigest string `json:"lastAppliedDigest,omitempty"`
 }
 
 // ObservedIdracSettingsStatus mirrors the controller-managed subset of

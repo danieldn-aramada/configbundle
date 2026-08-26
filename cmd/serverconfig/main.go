@@ -58,6 +58,18 @@ type Config struct {
 	// only, no periodic poll. Production deploys opt in via the K8s manifest
 	// — typical band is 1-5min; tighter intervals add load on iDRAC firmware.
 	ObserveInterval time.Duration `envconfig:"IDRAC_OBSERVE_INTERVAL" default:"0s"`
+
+	// ClusterName is the KubernetesCluster.name value from Orbital for the
+	// cluster this controller is deployed on. Used to scope the concurrent
+	// maintenance check to sibling ServerConfigs in this cluster. Default
+	// "UNSET" matches nothing — set to the actual cluster name in the site
+	// kustomize overlay (config/overlays/<site>/sc_cluster_patch.yaml).
+	ClusterName string `envconfig:"CLUSTER_NAME" default:"UNSET"`
+
+	// MaintenanceEnabled is the site-wide kill switch for the maintenance
+	// state machine. false = spec.maintenance is ignored entirely.
+	// Set true per-site once the feature is validated.
+	MaintenanceEnabled bool `envconfig:"MAINTENANCE_ENABLED" default:"false"`
 }
 
 // parseAllowlist splits a comma-separated string into a set, trimming
@@ -177,6 +189,8 @@ func main() {
 		setupLog.Info("drift-detection polling disabled (event-driven only); set IDRAC_OBSERVE_INTERVAL to enable")
 	}
 
+	setupLog.Info("maintenance state machine", "enabled", cfg.MaintenanceEnabled, "clusterName", cfg.ClusterName)
+
 	if err := (&serverconfig.ServerConfigReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
@@ -186,6 +200,8 @@ func main() {
 		CredentialsSecretName: cfg.CredentialsSecretName,
 		ObserveInterval:       cfg.ObserveInterval,
 		Recorder:              mgr.GetEventRecorderFor("serverconfig-controller"),
+		ClusterName:           cfg.ClusterName,
+		MaintenanceEnabled:    cfg.MaintenanceEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "serverconfig")
 		os.Exit(1)
