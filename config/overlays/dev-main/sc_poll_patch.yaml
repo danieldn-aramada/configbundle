@@ -1,0 +1,13 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: configbundle-serverconfig-controller
+  namespace: configbundle-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        env:
+        - name: IDRAC_POLL_INTERVAL
+          value: "5m"

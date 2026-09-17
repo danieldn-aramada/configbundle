@@ -47,6 +47,7 @@ type ConfigBundleReconciler struct {
 // +kubebuilder:rbac:groups=armada.ai,resources=configbundles/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=armada.ai,resources=configbundles/finalizers,verbs=update
 // +kubebuilder:rbac:groups=armada.ai,resources=serverconfigs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=armada.ai,resources=serverconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=armada.ai,resources=backupconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 

@@ -52,12 +52,12 @@ type Config struct {
 	CredentialsNamespace  string `envconfig:"IDRAC_CREDENTIALS_NAMESPACE" default:"default"`
 	CredentialsSecretName string `envconfig:"IDRAC_CREDENTIALS_SECRET"    default:"idrac-credentials"`
 
-	// ObserveInterval is how often the controller re-polls iDRAC for each CR
+	// PollInterval is how often the controller re-polls iDRAC for each CR
 	// independent of CR spec changes. Drives drift-detection metrics. Zero
 	// (the default, which keeps `go run` safe for local dev) = event-driven
 	// only, no periodic poll. Production deploys opt in via the K8s manifest
 	// — typical band is 1-5min; tighter intervals add load on iDRAC firmware.
-	ObserveInterval time.Duration `envconfig:"IDRAC_OBSERVE_INTERVAL" default:"0s"`
+	PollInterval time.Duration `envconfig:"IDRAC_POLL_INTERVAL" default:"0s"`
 
 	// ClusterName is the KubernetesCluster.name value from Orbital for the
 	// cluster this controller is deployed on. Used to scope the concurrent
@@ -183,10 +183,10 @@ func main() {
 
 	setupLog.Info("iDRAC credentials Secret", "namespace", cfg.CredentialsNamespace, "name", cfg.CredentialsSecretName)
 
-	if cfg.ObserveInterval > 0 {
-		setupLog.Info("drift-detection polling enabled", "interval", cfg.ObserveInterval)
+	if cfg.PollInterval > 0 {
+		setupLog.Info("drift-detection polling enabled", "interval", cfg.PollInterval)
 	} else {
-		setupLog.Info("drift-detection polling disabled (event-driven only); set IDRAC_OBSERVE_INTERVAL to enable")
+		setupLog.Info("drift-detection polling disabled (event-driven only); set IDRAC_POLL_INTERVAL to enable")
 	}
 
 	setupLog.Info("maintenance state machine", "enabled", cfg.MaintenanceEnabled, "clusterName", cfg.ClusterName)
@@ -198,7 +198,7 @@ func main() {
 		AllowedFields:         fieldAllowlist,
 		CredentialsNamespace:  cfg.CredentialsNamespace,
 		CredentialsSecretName: cfg.CredentialsSecretName,
-		ObserveInterval:       cfg.ObserveInterval,
+		PollInterval:          cfg.PollInterval,
 		Recorder:              mgr.GetEventRecorderFor("serverconfig-controller"),
 		ClusterName:           cfg.ClusterName,
 		MaintenanceEnabled:    cfg.MaintenanceEnabled,

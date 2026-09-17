@@ -17,6 +17,9 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Reconciled")].status
+      name: Reconciled
+      type: string
     - jsonPath: .spec.serviceTag
       name: ServiceTag
       type: string
@@ -277,54 +280,58 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              idracSettings:
+              lastAppliedBundle:
                 description: |-
-                  IdracSettings holds the controller's observed iDRAC state — values read
-                  live off the device (via Redfish) at the last reconcile. Mirrors
-                  spec.idracSettings: desired ↔ observed at matching paths, and the
-                  spec/status prefix is itself the label (no `observed:` wrapper — see
-                  docs/reference/DOMAIN-CONTROLLER.md §1). Absence of a field means the
-                  controller has never confirmed it. A superset of the managed spec subset:
-                  it may also carry observation-only fields with no desired counterpart.
+                  LastAppliedBundle records the ConfigBundle OCI artifact whose spec produced
+                  the current state of this ServerConfig. Written by cb-controller on each
+                  dispatch; nil until the first bundle is received.
                 properties:
-                  firmwareVersion:
-                    description: |-
-                      FirmwareVersion is the observed iDRAC firmware read from Redfish, mirroring
-                      spec.idracSettings.firmwareVersion. Nil until a firmware read lands (not yet
-                      implemented) — observation-only for now.
+                  appliedAt:
+                    description: AppliedAt is when cb-controller received and applied
+                      this bundle version.
+                    format: date-time
                     type: string
-                  ipmiEnabled:
-                    type: boolean
-                  racadmEnabled:
-                    type: boolean
-                  sshEnabled:
-                    type: boolean
+                  digest:
+                    description: Digest is the immutable OCI manifest digest of the
+                      ConfigBundle artifact.
+                    type: string
+                  version:
+                    description: Version is the OCI tag of the ConfigBundle artifact
+                      (e.g. "v94").
+                    type: string
                 type: object
-              lastAppliedAt:
+              lastObserved:
                 description: |-
-                  LastAppliedAt is the wall-clock time of the most recent successful
-                  reconcile action (PATCH landed, or no-op confirmed already-converged).
-                  Bumps on every reconcile that reaches the actuation step.
-                  Distinct from Conditions[Reconciled].LastTransitionTime, which per K8s
-                  convention only moves when Status flips — so that field lies for the
-                  "still Reconciled=True, another PATCH landed just now" case.
-                  LastAppliedAt is the truthful "is the controller still doing work?" signal.
-                  Per-action history goes to Kubernetes Events; this field is just a
-                  timestamp, no message. Nil = no successful reconcile yet.
+                  LastObserved holds the live device state captured during the last
+                  successful reconcile.
+                properties:
+                  idracSettings:
+                    description: IdracSettings is the iDRAC attribute state read from
+                      the device.
+                    properties:
+                      firmwareVersion:
+                        description: |-
+                          FirmwareVersion is the observed iDRAC firmware read from Redfish, mirroring
+                          spec.idracSettings.firmwareVersion. Nil until a firmware read lands (not yet
+                          implemented) — observation-only for now.
+                        type: string
+                      ipmiEnabled:
+                        type: boolean
+                      racadmEnabled:
+                        type: boolean
+                      sshEnabled:
+                        type: boolean
+                    type: object
+                type: object
+              lastReconciledAt:
+                description: |-
+                  LastReconciledAt is when sc-controller last successfully compared spec
+                  against live iDRAC state (and applied any deltas). Bumps on every
+                  successful reconcile whether triggered by a spec change or IDRAC_POLL_INTERVAL.
+                  Distinct from Conditions[Reconciled].LastTransitionTime, which only moves
+                  on status flip — this is the truthful "controller is still doing work" signal.
+                  Nil = no successful reconcile yet.
                 format: date-time
-                type: string
-              lastAppliedDigest:
-                description: |-
-                  LastAppliedDigest is the immutable artifact manifest digest (X-Orb-Digest)
-                  of the ConfigBundle artifact whose spec produced the current state of this
-                  ServerConfig. Matches ConfigBundleStatus.LastAppliedDigest on the parent.
-                type: string
-              lastAppliedVersion:
-                description: |-
-                  LastAppliedVersion is the OCI tag (X-Orb-Tag) of the ConfigBundle artifact
-                  whose spec produced the current state of this ServerConfig. Matches
-                  ConfigBundleStatus.LastAppliedVersion on the parent ConfigBundle. Allows a
-                  reader to identify the source artifact without cross-referencing the parent.
                 type: string
               maintenance:
                 description: Maintenance reflects the current maintenance sequence
@@ -382,19 +389,9 @@ spec:
                   ObservedGeneration is the spec.generation the controller last successfully
                   reconciled. Tooling compares this to metadata.generation to know "has the
                   controller caught up to my spec change yet?" — the K8s-standard
-                  "are we converged?" signal. Bumped on every successful reconcile, even
-                  when no PATCH was needed; gated by "only write if it would change" so
-                  periodic polls don't churn the apiserver.
+                  "are we converged?" signal.
                 format: int64
                 type: integer
-              phase:
-                description: Phase is the current lifecycle phase.
-                enum:
-                - Pending
-                - Applied
-                - Diverged
-                - Skipped
-                type: string
             type: object
         type: object
     served: true

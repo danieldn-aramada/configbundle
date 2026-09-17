@@ -64,7 +64,7 @@ status:
   conditions:                  # see §4
     - type: Reconciled
       status: "True"
-  lastAppliedAt: <ts>          # cross-cutting observation-only → top level
+  lastReconciledAt: <ts>        # cross-cutting observation-only → top level
   fooSettings:
     fieldA: <observed_last>    # 1:1 mirror of spec.fooSettings.fieldA
     fieldB: <observed_last>
@@ -150,7 +150,7 @@ upsert). Tri-state, PascalCase types, per-condition `observedGeneration`.
   for genuinely-broken resources. (Same reasoning as `NodeReady=Unknown`.)
 - **`LastTransitionTime` moves only on a status *flip*** (K8s norm). It lies for
   "still True, but the controller just did more work." So carry a separate
-  **`lastAppliedAt`** timestamp — the truthful "is the controller still working?"
+  **`lastReconciledAt`** timestamp — the truthful "is the controller still working?"
   signal — bumped on every successful reconcile.
 - **Condition `message` describes state** ("all managed settings match intent"),
   not the last action. **Per-action history goes to Kubernetes Events**, not the
@@ -158,9 +158,10 @@ upsert). Tri-state, PascalCase types, per-condition `observedGeneration`.
   aggregate/dedup, so emitting on every failing reconcile yields one aggregated
   event, not a flood.
 
-**Phases** (`.status.phase`) are a coarse human-readable rollup
-(`Pending`/`Applied`/`Diverged`/`Skipped`). Conditions are the machine signal;
-phase is the at-a-glance one.
+**Phases** (`.status.phase`) are optional — `serverconfig` does NOT use phase
+(conditions are sufficient; phase is redundant). New controllers should default
+to no phase unless a coarse human-readable rollup genuinely adds value beyond
+the `Reconciled` condition. ConfigBundle retains phase for legacy reasons.
 
 ## 6. Metrics conventions
 

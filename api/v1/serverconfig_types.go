@@ -229,35 +229,48 @@ type ServerConfigSpec struct {
 	Maintenance *MaintenanceSpec `json:"maintenance,omitempty"`
 }
 
-// ServerConfigPhase represents the current lifecycle phase.
-// +kubebuilder:validation:Enum=Pending;Applied;Diverged;Skipped
-type ServerConfigPhase string
+// BundleArtifact records the ConfigBundle OCI artifact that produced the
+// current spec of this ServerConfig. Written by cb-controller on each dispatch;
+// sc-controller never touches this field.
+type BundleArtifact struct {
+	// Version is the OCI tag of the ConfigBundle artifact (e.g. "v94").
+	// +optional
+	Version string `json:"version,omitempty"`
 
-const (
-	ServerConfigPhasePending  ServerConfigPhase = "Pending"
-	ServerConfigPhaseApplied  ServerConfigPhase = "Applied"
-	ServerConfigPhaseDiverged ServerConfigPhase = "Diverged"
-	// ServerConfigPhaseSkipped means the controller deliberately did not
-	// reconcile this CR. The Reconciled condition carries the reason
-	// (NoOobIP, NotInOobAllowlist). Distinct from Diverged (which implies
-	// we tried and failed) — Skipped is "we consciously chose not to try."
-	ServerConfigPhaseSkipped ServerConfigPhase = "Skipped"
-)
+	// Digest is the immutable OCI manifest digest of the ConfigBundle artifact.
+	// +optional
+	Digest string `json:"digest,omitempty"`
+
+	// AppliedAt is when cb-controller received and applied this bundle version.
+	// +optional
+	AppliedAt *metav1.Time `json:"appliedAt,omitempty"`
+}
+
+// ServerConfigObserved holds the live device state read during the last
+// reconcile. Written by sc-controller from live Redfish reads.
+type ServerConfigObserved struct {
+	// IdracSettings is the iDRAC attribute state read from the device.
+	// +optional
+	IdracSettings ObservedIdracSettingsStatus `json:"idracSettings,omitempty"`
+}
 
 // ServerConfigStatus records the controller's observed state.
 type ServerConfigStatus struct {
-	// Phase is the current lifecycle phase.
-	// +optional
-	Phase ServerConfigPhase `json:"phase,omitempty"`
-
 	// ObservedGeneration is the spec.generation the controller last successfully
 	// reconciled. Tooling compares this to metadata.generation to know "has the
 	// controller caught up to my spec change yet?" — the K8s-standard
-	// "are we converged?" signal. Bumped on every successful reconcile, even
-	// when no PATCH was needed; gated by "only write if it would change" so
-	// periodic polls don't churn the apiserver.
+	// "are we converged?" signal.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// LastReconciledAt is when sc-controller last successfully compared spec
+	// against live iDRAC state (and applied any deltas). Bumps on every
+	// successful reconcile whether triggered by a spec change or IDRAC_POLL_INTERVAL.
+	// Distinct from Conditions[Reconciled].LastTransitionTime, which only moves
+	// on status flip — this is the truthful "controller is still doing work" signal.
+	// Nil = no successful reconcile yet.
+	// +optional
+	LastReconciledAt *metav1.Time `json:"lastReconciledAt,omitempty"`
 
 	// Conditions records detailed status conditions.
 	// +optional
@@ -265,44 +278,20 @@ type ServerConfigStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// IdracSettings holds the controller's observed iDRAC state — values read
-	// live off the device (via Redfish) at the last reconcile. Mirrors
-	// spec.idracSettings: desired ↔ observed at matching paths, and the
-	// spec/status prefix is itself the label (no `observed:` wrapper — see
-	// docs/reference/DOMAIN-CONTROLLER.md §1). Absence of a field means the
-	// controller has never confirmed it. A superset of the managed spec subset:
-	// it may also carry observation-only fields with no desired counterpart.
+	// LastAppliedBundle records the ConfigBundle OCI artifact whose spec produced
+	// the current state of this ServerConfig. Written by cb-controller on each
+	// dispatch; nil until the first bundle is received.
 	// +optional
-	IdracSettings ObservedIdracSettingsStatus `json:"idracSettings,omitempty"`
+	LastAppliedBundle *BundleArtifact `json:"lastAppliedBundle,omitempty"`
 
-	// LastAppliedAt is the wall-clock time of the most recent successful
-	// reconcile action (PATCH landed, or no-op confirmed already-converged).
-	// Bumps on every reconcile that reaches the actuation step.
-	// Distinct from Conditions[Reconciled].LastTransitionTime, which per K8s
-	// convention only moves when Status flips — so that field lies for the
-	// "still Reconciled=True, another PATCH landed just now" case.
-	// LastAppliedAt is the truthful "is the controller still doing work?" signal.
-	// Per-action history goes to Kubernetes Events; this field is just a
-	// timestamp, no message. Nil = no successful reconcile yet.
+	// LastObserved holds the live device state captured during the last
+	// successful reconcile.
 	// +optional
-	LastAppliedAt *metav1.Time `json:"lastAppliedAt,omitempty"`
+	LastObserved *ServerConfigObserved `json:"lastObserved,omitempty"`
 
 	// Maintenance reflects the current maintenance sequence state.
 	// +optional
 	Maintenance *MaintenanceStatus `json:"maintenance,omitempty"`
-
-	// LastAppliedVersion is the OCI tag (X-Orb-Tag) of the ConfigBundle artifact
-	// whose spec produced the current state of this ServerConfig. Matches
-	// ConfigBundleStatus.LastAppliedVersion on the parent ConfigBundle. Allows a
-	// reader to identify the source artifact without cross-referencing the parent.
-	// +optional
-	LastAppliedVersion string `json:"lastAppliedVersion,omitempty"`
-
-	// LastAppliedDigest is the immutable artifact manifest digest (X-Orb-Digest)
-	// of the ConfigBundle artifact whose spec produced the current state of this
-	// ServerConfig. Matches ConfigBundleStatus.LastAppliedDigest on the parent.
-	// +optional
-	LastAppliedDigest string `json:"lastAppliedDigest,omitempty"`
 }
 
 // ObservedIdracSettingsStatus mirrors the controller-managed subset of
@@ -325,6 +314,7 @@ type ObservedIdracSettingsStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=sc
+// +kubebuilder:printcolumn:name="Reconciled",type=string,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`
 // +kubebuilder:printcolumn:name="ServiceTag",type=string,JSONPath=`.spec.serviceTag`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="OrbID",type=string,priority=1,JSONPath=`.spec.orbId`

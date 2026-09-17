@@ -433,8 +433,12 @@ func (s *ConsumeServer) stampBundleProvenance(ctx context.Context, spec armadav1
 			if err := s.Client.Get(ctx, client.ObjectKey{Name: name}, &sc); err != nil {
 				return client.IgnoreNotFound(err)
 			}
-			sc.Status.LastAppliedVersion = tag
-			sc.Status.LastAppliedDigest = digest
+			now := metav1.Now()
+			sc.Status.LastAppliedBundle = &armadav1.BundleArtifact{
+				Version:   tag,
+				Digest:    digest,
+				AppliedAt: &now,
+			}
 			return s.Client.Status().Update(ctx, &sc)
 		})
 		if err != nil {

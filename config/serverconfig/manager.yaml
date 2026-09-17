@@ -105,7 +105,7 @@ spec:
             configMapKeyRef:
               name: serverconfig-controller-config
               key: clusterName
-        - name: IDRAC_OBSERVE_INTERVAL
+        - name: IDRAC_POLL_INTERVAL
           value: "1m"
         ports:
         - containerPort: 8092

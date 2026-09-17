@@ -13,14 +13,15 @@ import (
 )
 
 // TestServerConfigStatus_JSONRoundTrip pins the reshaped status serialization:
-// observed iDRAC state lives at status.idracSettings (not the old
-// status.observed.idracSettings wrapper), and firmware is folded into
-// status.idracSettings.firmwareVersion (not a top-level observedFirmwareVersion).
+// observed iDRAC state lives at status.lastObserved.idracSettings, and
+// firmware is folded into status.lastObserved.idracSettings.firmwareVersion.
 func TestServerConfigStatus_JSONRoundTrip(t *testing.T) {
 	in := armadav1.ServerConfigStatus{
-		IdracSettings: armadav1.ObservedIdracSettingsStatus{
-			SSHEnabled:      ptr.To(false),
-			FirmwareVersion: ptr.To("7.20.10.05"),
+		LastObserved: &armadav1.ServerConfigObserved{
+			IdracSettings: armadav1.ObservedIdracSettingsStatus{
+				SSHEnabled:      ptr.To(false),
+				FirmwareVersion: ptr.To("7.20.10.05"),
+			},
 		},
 	}
 	b, err := json.Marshal(in)
@@ -28,7 +29,7 @@ func TestServerConfigStatus_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	js := string(b)
-	for _, want := range []string{`"idracSettings":`, `"sshEnabled":false`, `"firmwareVersion":"7.20.10.05"`} {
+	for _, want := range []string{`"lastObserved":`, `"idracSettings":`, `"sshEnabled":false`, `"firmwareVersion":"7.20.10.05"`} {
 		if !strings.Contains(js, want) {
 			t.Errorf("marshalled status missing %q\ngot: %s", want, js)
 		}
@@ -42,11 +43,21 @@ func TestServerConfigStatus_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.IdracSettings.SSHEnabled == nil || *out.IdracSettings.SSHEnabled {
-		t.Errorf("round-trip sshEnabled = %v, want false", out.IdracSettings.SSHEnabled)
+	if out.LastObserved == nil || out.LastObserved.IdracSettings.SSHEnabled == nil || *out.LastObserved.IdracSettings.SSHEnabled {
+		t.Errorf("round-trip sshEnabled = %v, want false", func() interface{} {
+			if out.LastObserved != nil {
+				return out.LastObserved.IdracSettings.SSHEnabled
+			}
+			return nil
+		}())
 	}
-	if out.IdracSettings.FirmwareVersion == nil || *out.IdracSettings.FirmwareVersion != "7.20.10.05" {
-		t.Errorf("round-trip firmwareVersion = %v, want 7.20.10.05", out.IdracSettings.FirmwareVersion)
+	if out.LastObserved == nil || out.LastObserved.IdracSettings.FirmwareVersion == nil || *out.LastObserved.IdracSettings.FirmwareVersion != "7.20.10.05" {
+		t.Errorf("round-trip firmwareVersion = %v, want 7.20.10.05", func() interface{} {
+			if out.LastObserved != nil {
+				return out.LastObserved.IdracSettings.FirmwareVersion
+			}
+			return nil
+		}())
 	}
 }
 

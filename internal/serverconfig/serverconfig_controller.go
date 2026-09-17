@@ -179,12 +179,12 @@ type ServerConfigReconciler struct {
 	// paranoid (nothing reconciled). Same shape as AllowedOobIPs.
 	AllowedFields map[string]bool
 
-	// ObserveInterval is the cadence at which the reconciler re-polls iDRAC
+	// PollInterval is the cadence at which the reconciler re-polls iDRAC
 	// even when nothing on the CR has changed. Drives drift detection: without
 	// it, an out-of-band iDRAC change (someone toggles via the web UI) would
 	// stay invisible until the next spec change. Zero = no periodic poll
 	// (event-driven only).
-	ObserveInterval time.Duration
+	PollInterval time.Duration
 
 	// Recorder emits per-action Kubernetes Events (PATCH landed, PATCH failed,
 	// etc.) so operators can see the action history via `kubectl describe sc
@@ -350,7 +350,7 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 			r.markReconcileSuccess(ctx, &sc)
 		}
 		recordReconcileSuccess(sc.Name, oobIP, sc.Spec.OrbID, time.Now().Unix())
-		return mergeResult(maintResult, reconcile.Result{RequeueAfter: r.ObserveInterval}), nil
+		return mergeResult(maintResult, reconcile.Result{RequeueAfter: r.PollInterval}), nil
 	}
 
 	if err := rc.PatchAttributes(ctx, deltas); err != nil {
@@ -373,7 +373,7 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	r.Recorder.Eventf(&sc, corev1.EventTypeNormal, "Applied", patchMsg)
 	r.setStatusApplied(ctx, &sc)
 	recordReconcileSuccess(sc.Name, oobIP, sc.Spec.OrbID, time.Now().Unix())
-	return mergeResult(maintResult, reconcile.Result{RequeueAfter: r.ObserveInterval}), nil
+	return mergeResult(maintResult, reconcile.Result{RequeueAfter: r.PollInterval}), nil
 }
 
 // formatDeltas renders a small map as a stable, human-readable string for
@@ -391,74 +391,62 @@ func formatDeltas(d map[string]string) string {
 	return strings.Join(parts, ", ")
 }
 
-// setStatusApplied writes Phase=Applied + Reconciled=True with a stable,
-// generic Reason and Message — the K8s norm is that Condition Message
-// describes STATE ("we're converged"), not the last ACTION. Per-PATCH
-// action detail goes to Kubernetes Events (via r.Recorder), not the
-// Condition. Best-effort: status conflicts are logged and dropped; the
-// next reconcile will reassert.
+// setStatusApplied writes Reconciled=True with a stable, generic Reason and
+// Message — the K8s norm is that Condition Message describes STATE
+// ("we're converged"), not the last ACTION. Per-PATCH action detail goes to
+// Kubernetes Events (via r.Recorder), not the Condition. Bumps
+// LastReconciledAt to signal "controller is still active."
 func (r *ServerConfigReconciler) setStatusApplied(ctx context.Context, sc *armadav1.ServerConfig) {
-	r.writeStatus(ctx, sc, armadav1.ServerConfigPhaseApplied, metav1.ConditionTrue,
-		"SettingsApplied", "all managed settings match intent", true /* bumpLastApplied */)
+	r.writeStatus(ctx, sc, metav1.ConditionTrue,
+		"SettingsApplied", "all managed settings match intent", true)
 }
 
-// setStatusFailed writes Phase=Diverged + Reconciled=False with a Reason that
-// names which step failed (MissingCredentials, RedfishReadFailed, RedfishPatchFailed).
-// Does NOT bump LastAppliedAt — the reconcile did not succeed.
+// setStatusFailed writes Reconciled=False with a Reason that names which step
+// failed (MissingCredentials, RedfishReadFailed, RedfishPatchFailed). Does NOT
+// bump LastReconciledAt — the reconcile did not succeed.
 //
 // Also emits a Warning Event so failures surface to humans via `kubectl
 // describe sc <name>` and `kubectl get events`, symmetric with the Normal
-// "Applied" events on success. K8s Event aggregation dedups repeats
-// (count/lastTimestamp), so a persistently-failing iDRAC yields one aggregated
-// event, not a flood — safe to emit on every failing reconcile.
+// "Applied" events on success.
 func (r *ServerConfigReconciler) setStatusFailed(ctx context.Context, sc *armadav1.ServerConfig, reason, msg string) {
 	r.Recorder.Event(sc, corev1.EventTypeWarning, reason, msg)
-	r.writeStatus(ctx, sc, armadav1.ServerConfigPhaseDiverged, metav1.ConditionFalse, reason, msg, false)
+	r.writeStatus(ctx, sc, metav1.ConditionFalse, reason, msg, false)
 }
 
-// setStatusSkipped writes Phase=Skipped + Reconciled=Unknown with a Reason
-// describing why the controller deliberately did not reconcile this CR
-// (NoOobIP, NotInOobAllowlist).
+// setStatusSkipped writes Reconciled=Unknown with a Reason describing why the
+// controller deliberately did not reconcile this CR (NoOobIP, NotInOobAllowlist).
 //
 // Unknown, not False, is deliberate: False means "managed, and determined NOT
 // converged" (a real problem worth alerting on). A skipped CR isn't managed by
-// this controller instance, so convergence is simply not being determined —
-// that's the textbook meaning of Unknown. Keeping it out of False means an
-// operator alerting on `Reconciled=False` pages only for genuinely-broken
-// servers, not for ones deliberately out of scope. (Same reasoning K8s uses
-// for NodeReady=Unknown when a node is unreachable.)
-// Does NOT bump LastAppliedAt — no apply happened.
+// this controller instance — convergence is simply not being determined.
+// Does NOT bump LastReconciledAt — no reconcile happened.
 func (r *ServerConfigReconciler) setStatusSkipped(ctx context.Context, sc *armadav1.ServerConfig, reason, msg string) {
 	// Skipped ⇒ not managed here ⇒ the reconcile_success series must be ABSENT
-	// (absent = skip), not 0 (which means "managed and failing"). Drop any prior
-	// series for a server that has left the allowlist.
+	// (absent = skip), not 0 (which means "managed and failing").
 	removeReconcileSuccess(sc.Name)
-	r.writeStatus(ctx, sc, armadav1.ServerConfigPhaseSkipped, metav1.ConditionUnknown, reason, msg, false)
+	r.writeStatus(ctx, sc, metav1.ConditionUnknown, reason, msg, false)
 }
 
-// writeStatus updates the ServerConfig's Phase + Reconciled condition, and
-// optionally bumps LastAppliedAt (success paths only). Wrapped in
-// RetryOnConflict so an immediately-prior Get's resourceVersion going stale
-// (e.g. just after `kubectl apply` creates the CR and the cache hasn't fully
-// synced) doesn't surface a benign optimistic-concurrency 409.
-func (r *ServerConfigReconciler) writeStatus(ctx context.Context, sc *armadav1.ServerConfig, phase armadav1.ServerConfigPhase, condStatus metav1.ConditionStatus, reason, msg string, bumpLastApplied bool) {
+// writeStatus updates the Reconciled condition and optionally bumps
+// LastReconciledAt (success paths only). Wrapped in RetryOnConflict so an
+// immediately-prior Get's resourceVersion going stale doesn't surface a benign
+// 409.
+func (r *ServerConfigReconciler) writeStatus(ctx context.Context, sc *armadav1.ServerConfig, condStatus metav1.ConditionStatus, reason, msg string, bumpLastReconciled bool) {
 	logger := log.FromContext(ctx).WithName("serverconfig.status")
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var fresh armadav1.ServerConfig
 		if err := r.Get(ctx, client.ObjectKeyFromObject(sc), &fresh); err != nil {
 			return err
 		}
-		fresh.Status.Phase = phase
+		base := fresh.DeepCopy()
 		fresh.Status.ObservedGeneration = fresh.Generation
-		if bumpLastApplied {
+		if bumpLastReconciled {
 			now := metav1.Now()
-			fresh.Status.LastAppliedAt = &now
+			fresh.Status.LastReconciledAt = &now
 		}
 		// meta.SetStatusCondition is the apimachinery-canonical upsert: it moves
 		// LastTransitionTime only when Status flips, and always refreshes
 		// Reason/Message/ObservedGeneration — exactly the semantics we want.
-		// Passing ObservedGeneration records which spec generation this
-		// condition reflects (per-condition freshness signal).
 		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
 			Type:               ConditionReconciled,
 			Status:             condStatus,
@@ -466,7 +454,7 @@ func (r *ServerConfigReconciler) writeStatus(ctx context.Context, sc *armadav1.S
 			Message:            msg,
 			ObservedGeneration: fresh.Generation,
 		})
-		return r.Status().Update(ctx, &fresh)
+		return r.Status().Patch(ctx, &fresh, client.MergeFrom(base))
 	})
 	if err != nil {
 		logger.Info("status update failed (will retry next reconcile)", "err", err.Error())
@@ -491,7 +479,7 @@ func (r *ServerConfigReconciler) writeStatus(ctx context.Context, sc *armadav1.S
 // iDRAC round-trips on unrelated status races.
 func (r *ServerConfigReconciler) recordObserved(ctx context.Context, sc *armadav1.ServerConfig, attrs map[string]any) {
 	desired := buildObservedIdrac(attrs, r.AllowedFields)
-	if observedIdracEqual(sc.Status.IdracSettings, desired) {
+	if observedIdracEqual(observedIdracOrZero(sc.Status.LastObserved), desired) {
 		return
 	}
 	logger := log.FromContext(ctx).WithName("serverconfig.status")
@@ -500,15 +488,23 @@ func (r *ServerConfigReconciler) recordObserved(ctx context.Context, sc *armadav
 		if err := r.Get(ctx, client.ObjectKeyFromObject(sc), &fresh); err != nil {
 			return err
 		}
-		if observedIdracEqual(fresh.Status.IdracSettings, desired) {
+		if observedIdracEqual(observedIdracOrZero(fresh.Status.LastObserved), desired) {
 			return nil
 		}
-		fresh.Status.IdracSettings = desired
-		return r.Status().Update(ctx, &fresh)
+		base := fresh.DeepCopy()
+		fresh.Status.LastObserved = &armadav1.ServerConfigObserved{IdracSettings: desired}
+		return r.Status().Patch(ctx, &fresh, client.MergeFrom(base))
 	})
 	if err != nil {
 		logger.Info("observed status update failed (will retry next reconcile)", "err", err.Error())
 	}
+}
+
+func observedIdracOrZero(obs *armadav1.ServerConfigObserved) armadav1.ObservedIdracSettingsStatus {
+	if obs == nil {
+		return armadav1.ObservedIdracSettingsStatus{}
+	}
+	return obs.IdracSettings
 }
 
 // buildObservedIdrac projects the live Redfish attribute map into the
@@ -552,25 +548,34 @@ func boolPtrEqual(a, b *bool) bool {
 	return *a == *b
 }
 
-// markReconcileSuccess bumps status.observedGeneration and status.lastAppliedAt
-// on steady-state successful reconciles (Reconciled=True stays True). The
-// Reconciled condition is deliberately NOT rewritten here — K8s norm is that
-// Condition.LastTransitionTime only moves on Status flip. LastAppliedAt is
-// the truthful "controller is still doing work" signal; ObservedGeneration is
-// the "controller has caught up to this spec.generation" signal. Skipped
-// entirely when both markers already match, so periodic polls in steady state
-// produce zero apiserver writes.
+// markReconcileSuccess bumps status.observedGeneration and
+// status.lastReconciledAt on steady-state successful reconciles
+// (Reconciled=True stays True). The Reconciled condition is deliberately NOT
+// rewritten — K8s norm is that Condition.LastTransitionTime only moves on
+// Status flip. LastReconciledAt is the truthful "controller is still doing
+// work" signal. Skipped entirely when both markers already match, so periodic
+// polls in steady state produce zero apiserver writes.
 func (r *ServerConfigReconciler) markReconcileSuccess(ctx context.Context, sc *armadav1.ServerConfig) {
-	needBump := sc.Status.ObservedGeneration != sc.Generation || sc.Status.LastAppliedAt == nil
-	if !needBump {
-		// Rate-limit LastAppliedAt writes to roughly once per ObserveInterval —
-		// otherwise every 5-min drift poll would touch status even when nothing
-		// meaningful changed. If the previous LastAppliedAt is older than half
-		// the observe interval, bump it; otherwise skip.
-		if r.ObserveInterval > 0 && time.Since(sc.Status.LastAppliedAt.Time) > r.ObserveInterval/2 {
-			needBump = true
-		}
+	// minAge: rate-limit to avoid double-writes within the same poll cycle,
+	// but floor at 30s so restarts always record a fresh lastReconciledAt
+	// regardless of PollInterval setting.
+	minAge := r.PollInterval / 2
+	if minAge < 30*time.Second {
+		minAge = 30 * time.Second
 	}
+	conditionStale := func(conditions []metav1.Condition) bool {
+		for _, c := range conditions {
+			if c.Type == ConditionReconciled {
+				return c.ObservedGeneration != sc.Generation
+			}
+		}
+		return false
+	}
+
+	needBump := sc.Status.ObservedGeneration != sc.Generation ||
+		sc.Status.LastReconciledAt == nil ||
+		time.Since(sc.Status.LastReconciledAt.Time) > minAge ||
+		conditionStale(sc.Status.Conditions)
 	if !needBump {
 		return
 	}
@@ -581,19 +586,42 @@ func (r *ServerConfigReconciler) markReconcileSuccess(ctx context.Context, sc *a
 			return err
 		}
 		changed := false
+		base := fresh.DeepCopy()
 		if fresh.Status.ObservedGeneration != fresh.Generation {
 			fresh.Status.ObservedGeneration = fresh.Generation
 			changed = true
 		}
-		if fresh.Status.LastAppliedAt == nil || (r.ObserveInterval > 0 && time.Since(fresh.Status.LastAppliedAt.Time) > r.ObserveInterval/2) {
+		if fresh.Status.LastReconciledAt == nil || time.Since(fresh.Status.LastReconciledAt.Time) > minAge {
 			now := metav1.Now()
-			fresh.Status.LastAppliedAt = &now
+			fresh.Status.LastReconciledAt = &now
+			changed = true
+		}
+		// Refresh the condition's observedGeneration so consumers see it was
+		// evaluated against the current spec generation, not an older one.
+		// meta.SetStatusCondition is idempotent on lastTransitionTime — it only
+		// moves when the condition Status flips, so this is a no-op for the
+		// human-visible "something changed" signal.
+		prevGen := int64(0)
+		for _, c := range fresh.Status.Conditions {
+			if c.Type == ConditionReconciled {
+				prevGen = c.ObservedGeneration
+				break
+			}
+		}
+		if prevGen != fresh.Generation {
+			meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
+				Type:               ConditionReconciled,
+				Status:             metav1.ConditionTrue,
+				Reason:             "SettingsApplied",
+				Message:            "all managed settings match intent",
+				ObservedGeneration: fresh.Generation,
+			})
 			changed = true
 		}
 		if !changed {
 			return nil
 		}
-		return r.Status().Update(ctx, &fresh)
+		return r.Status().Patch(ctx, &fresh, client.MergeFrom(base))
 	})
 	if err != nil {
 		logger.Info("reconcile-marker update failed (will retry next reconcile)", "err", err.Error())

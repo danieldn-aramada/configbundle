@@ -97,6 +97,24 @@ spec:
     usbManagementPortEnabled: true
     dhcpEnabled: false
     racadmEnabled: true
+status:
+  observedGeneration: 3
+  lastReconciledAt: "2026-09-03T12:00:00Z"   # bumped every successful reconcile (not just on spec change)
+  conditions:
+    - type: Reconciled
+      status: "True"
+      reason: SettingsApplied
+      observedGeneration: 3                   # tracks current generation (updated on polls too)
+  lastAppliedBundle:
+    version: "v42"
+    digest: "sha256:abc123..."
+    appliedAt: "2026-09-01T10:00:00Z"         # written by cb-controller via stampBundleProvenance
+  lastObserved:
+    idracSettings:
+      sshEnabled: false
+      racadmEnabled: true
+  maintenance:
+    phase: Active
 ```
 
 ---

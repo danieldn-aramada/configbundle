@@ -58,11 +58,17 @@ func TestStampBundleProvenance_ExistingServerConfig(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: hostname}, &got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Status.LastAppliedVersion != "v42" {
-		t.Errorf("LastAppliedVersion = %q, want %q", got.Status.LastAppliedVersion, "v42")
+	if got.Status.LastAppliedBundle == nil {
+		t.Fatal("LastAppliedBundle is nil, want populated")
 	}
-	if got.Status.LastAppliedDigest != "sha256:deadbeef" {
-		t.Errorf("LastAppliedDigest = %q, want %q", got.Status.LastAppliedDigest, "sha256:deadbeef")
+	if got.Status.LastAppliedBundle.Version != "v42" {
+		t.Errorf("LastAppliedBundle.Version = %q, want %q", got.Status.LastAppliedBundle.Version, "v42")
+	}
+	if got.Status.LastAppliedBundle.Digest != "sha256:deadbeef" {
+		t.Errorf("LastAppliedBundle.Digest = %q, want %q", got.Status.LastAppliedBundle.Digest, "sha256:deadbeef")
+	}
+	if got.Status.LastAppliedBundle.AppliedAt == nil {
+		t.Errorf("LastAppliedBundle.AppliedAt is nil, want a timestamp")
 	}
 }
 
@@ -105,8 +111,8 @@ func TestStampBundleProvenance_EmptyTag(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: hostname}, &got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Status.LastAppliedVersion != "" {
-		t.Errorf("expected empty LastAppliedVersion, got %q", got.Status.LastAppliedVersion)
+	if got.Status.LastAppliedBundle != nil {
+		t.Errorf("expected LastAppliedBundle to remain nil on empty tag, got %+v", got.Status.LastAppliedBundle)
 	}
 }
 

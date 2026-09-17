@@ -92,9 +92,6 @@ func TestReconcile_SkipsNoOobIP_WritesStatus(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: sc.Name}, &got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Status.Phase != armadav1.ServerConfigPhaseSkipped {
-		t.Errorf("Phase = %q, want Skipped", got.Status.Phase)
-	}
 	assertReconciledCondition(t, &got, metav1.ConditionUnknown, "NoOobIP", "spec.oobIP is empty")
 }
 
@@ -122,9 +119,6 @@ func TestReconcile_SkipsOobNotAllowlisted_WritesStatus(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: sc.Name}, &got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Status.Phase != armadav1.ServerConfigPhaseSkipped {
-		t.Errorf("Phase = %q, want Skipped", got.Status.Phase)
-	}
 	// Message names the offending IP so operators can grep for it.
 	assertReconciledCondition(t, &got, metav1.ConditionUnknown, "NotInOobAllowlist", "10.99.99.99")
 }
@@ -147,7 +141,6 @@ func TestReconcile_SkipStatusClearsOnAllowlistAdmission(t *testing.T) {
 		Status: armadav1.ServerConfigStatus{
 			// Simulate a previous reconcile that skipped this CR (before the
 			// operator flipped it into the allowlist).
-			Phase: armadav1.ServerConfigPhaseSkipped,
 			Conditions: []metav1.Condition{{
 				Type:               ConditionReconciled,
 				Status:             metav1.ConditionUnknown,
@@ -172,8 +165,10 @@ func TestReconcile_SkipStatusClearsOnAllowlistAdmission(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: sc.Name}, &got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Status.Phase == armadav1.ServerConfigPhaseSkipped {
-		t.Errorf("Phase stuck at Skipped after allowlist admission; want progression to Diverged or Applied")
+	for _, c := range got.Status.Conditions {
+		if c.Type == ConditionReconciled && c.Status == metav1.ConditionUnknown && c.Reason == "NotInOobAllowlist" {
+			t.Errorf("Reconciled condition stuck at Unknown/NotInOobAllowlist after allowlist admission; want progression past the skip gate")
+		}
 	}
 }
 

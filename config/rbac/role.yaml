@@ -42,6 +42,7 @@ rules:
   resources:
   - backupconfigs/status
   - configbundles/status
+  - serverconfigs/status
   verbs:
   - get
   - patch
