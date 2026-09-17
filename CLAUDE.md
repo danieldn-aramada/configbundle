@@ -32,8 +32,8 @@
 ## Current State
 
 **Phase:** Prototype
-**Active work:** sc-controller maintenance state machine shipped (Checking → Active, eligibility checks, CLUSTER_NAME/MAINTENANCE_ENABLED env vars). ServerConfig status now carries `lastAppliedVersion` + `lastAppliedDigest` propagated from the parent ConfigBundle — ready to deploy to dev-main (CRD apply first). Change management design doc written at `.local/design-change-management.md` — Approach 2 (PIM gate + diff review + apply) chosen, aligned to Orbital Spike 30 preview endpoint; revert API gap flagged to Orbital session.
-**Next priority:** Deploy sc-controller maintenance + bundle provenance to dev-main; Orbital Spike 30 revert API scope confirmation; Spike 8 (full pipeline e2e).
+**Active work:** ServerConfig status redesign shipped and deployed to colo-dev-main (sc-controller v0.0.3). Removed `phase` field; new shape: `lastReconciledAt`, `lastAppliedBundle` (written by cb-controller), `lastObserved.idracSettings`, `maintenance`. cb-controller consume.go updated to write `LastAppliedBundle` sub-object but NOT yet deployed (still v0.0.8). Bundler OAuth2 client now supports non-Entra providers via `ORBITAL_TOKEN_URL` + `ORBITAL_TOKEN_SCOPE` env vars (Keycloak migration path). Research: Galleon Firmware Drift SDD v0.2 reviewed; NICo (NVIDIA Infra Controller) researched as precedent — findings at `.local/research-nico.md`.
+**Next priority:** Deploy cb-controller v0.0.9 (LastAppliedBundle); Orbital Spike 30 revert API scope confirmation; Spike 8 (full pipeline e2e).
 
 *Update this section at each session wrap-up.*
 

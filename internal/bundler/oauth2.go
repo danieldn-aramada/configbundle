@@ -15,23 +15,37 @@ import (
 const DefaultHTTPTimeout = 25 * time.Second
 
 // NewOAuth2HTTPClient returns an http.Client that obtains tokens via the OAuth2
-// client credentials grant (Azure AD) and retries once on HTTP 401.
+// client credentials grant and retries once on HTTP 401.
 // The returned client is safe for concurrent use and caches tokens until expiry.
 //
-// Token URL is derived from OIDCIssuerURL (strips /v2.0 suffix, appends /oauth2/v2.0/token).
-// Scope is derived from OIDCClientID as api://{clientID}/.default.
+// Token URL: cfg.TokenURL if set; otherwise derived from OIDCIssuerURL via
+// oidcIssuerToTokenURL (Entra format). Scope: cfg.TokenScope if set; otherwise
+// api://{OIDCClientID}/.default (Entra client-credentials default).
 func NewOAuth2HTTPClient(cfg *Config) *http.Client {
-	tokenURL := oidcIssuerToTokenURL(cfg.OIDCIssuerURL)
+	tokenURL := cfg.TokenURL
+	if tokenURL == "" {
+		tokenURL = oidcIssuerToTokenURL(cfg.OIDCIssuerURL)
+	}
 	return newOAuth2HTTPClientWithURL(cfg, tokenURL)
 }
 
-// oidcIssuerToTokenURL derives the token endpoint from an OIDC issuer URL.
+// oidcIssuerToTokenURL derives the Entra token endpoint from an OIDC issuer URL.
 // "https://login.microsoftonline.com/{tenant}/v2.0" →
 // "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+// Not used when cfg.TokenURL is set.
 func oidcIssuerToTokenURL(issuerURL string) string {
-	base := strings.TrimSuffix(issuerURL, "/v2.0")
-	base = strings.TrimSuffix(base, "/")
+	base := strings.TrimSuffix(issuerURL, "/")
+	base = strings.TrimSuffix(base, "/v2.0")
 	return base + "/oauth2/v2.0/token"
+}
+
+// tokenScope returns the OAuth2 scope to request. Uses cfg.TokenScope when set;
+// otherwise falls back to the Entra client-credentials form.
+func tokenScope(cfg *Config) string {
+	if cfg.TokenScope != "" {
+		return cfg.TokenScope
+	}
+	return "api://" + cfg.OIDCClientID + "/.default"
 }
 
 // newOAuth2HTTPClientWithURL is the internal constructor used by NewOAuth2HTTPClient
@@ -41,7 +55,7 @@ func newOAuth2HTTPClientWithURL(cfg *Config, tokenURL string) *http.Client {
 		ClientID:     cfg.OIDCClientID,
 		ClientSecret: cfg.OIDCClientSecret,
 		TokenURL:     tokenURL,
-		Scopes:       []string{"api://" + cfg.OIDCClientID + "/.default"},
+		Scopes:       []string{tokenScope(cfg)},
 	}
 	// ccCfg.Client caches tokens via ReuseTokenSource; expires before expiry.
 	oauth2Client := ccCfg.Client(context.Background())

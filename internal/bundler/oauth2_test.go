@@ -1,8 +1,10 @@
 package bundler
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -25,6 +27,123 @@ func newTestOAuth2Client(t *testing.T, tokenSrv *httptest.Server) *http.Client {
 		OIDCClientSecret: "test-secret",
 	}
 	return newOAuth2HTTPClientWithURL(cfg, tokenSrv.URL+"/token")
+}
+
+func TestOIDCIssuerToTokenURL(t *testing.T) {
+	cases := []struct {
+		issuer string
+		want   string
+	}{
+		{
+			"https://login.microsoftonline.com/tenant-id/v2.0",
+			"https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token",
+		},
+		{
+			"https://login.microsoftonline.com/tenant-id/v2.0/",
+			"https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token",
+		},
+		{
+			"https://login.microsoftonline.com/tenant-id",
+			"https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token",
+		},
+	}
+	for _, tc := range cases {
+		got := oidcIssuerToTokenURL(tc.issuer)
+		if got != tc.want {
+			t.Errorf("oidcIssuerToTokenURL(%q) = %q, want %q", tc.issuer, got, tc.want)
+		}
+	}
+}
+
+func TestTokenURL_OverrideSkipsDerivation(t *testing.T) {
+	var tokenCalls atomic.Int32
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"tok","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	keycloakURL := tokenSrv.URL + "/realms/armada/protocol/openid-connect/token"
+	cfg := &Config{
+		OIDCIssuerURL:    "https://login.microsoftonline.com/tenant/v2.0", // would produce wrong URL if used
+		OIDCClientID:     "cb-bundler",
+		OIDCClientSecret: "secret",
+		TokenURL:         keycloakURL,
+	}
+	// NewOAuth2HTTPClient must use TokenURL, not the Entra derivation.
+	client := NewOAuth2HTTPClient(cfg)
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+
+	resp, err := client.Get(api.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+
+	if tokenCalls.Load() == 0 {
+		t.Error("expected token endpoint to be called; it was not — wrong URL used")
+	}
+}
+
+func TestTokenScope_Default(t *testing.T) {
+	cfg := &Config{OIDCClientID: "my-client"}
+	got := tokenScope(cfg)
+	want := "api://my-client/.default"
+	if got != want {
+		t.Errorf("tokenScope default: got %q, want %q", got, want)
+	}
+}
+
+func TestTokenScope_Override(t *testing.T) {
+	cfg := &Config{OIDCClientID: "my-client", TokenScope: "openid profile"}
+	got := tokenScope(cfg)
+	want := "openid profile"
+	if got != want {
+		t.Errorf("tokenScope override: got %q, want %q", got, want)
+	}
+}
+
+func TestTokenScope_SentToEndpoint(t *testing.T) {
+	var gotScope string
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		for _, part := range strings.Split(string(body), "&") {
+			if strings.HasPrefix(part, "scope=") {
+				gotScope = strings.TrimPrefix(part, "scope=")
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"tok","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer tokenSrv.Close()
+
+	cfg := &Config{
+		OIDCClientID:     "cb-bundler",
+		OIDCClientSecret: "secret",
+		TokenURL:         tokenSrv.URL,
+		TokenScope:       "openid",
+	}
+	client := NewOAuth2HTTPClient(cfg)
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+
+	resp, err := client.Get(api.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+
+	if gotScope != "openid" {
+		t.Errorf("scope sent to token endpoint: got %q, want %q", gotScope, "openid")
+	}
 }
 
 func TestStaticBearerTransport_SetsHeader(t *testing.T) {

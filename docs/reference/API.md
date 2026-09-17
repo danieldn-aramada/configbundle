@@ -110,9 +110,11 @@ type layer struct {
 | `BUNDLER_PORT` | `8020` | HTTP listen port |
 | `ORBITAL_GRAPHQL_URL` | `http://localhost:8001/graphql` | Orbital GraphQL endpoint |
 | `ORBITAL_API_URL` | `http://localhost:8001` | Orbital REST API base (pending-force resolutions) |
-| `ORBITAL_OIDC_ISSUER_URL` | `https://login.microsoftonline.com/{tenant}/v2.0` | OIDC issuer; token URL derived from this |
-| `ORBITAL_OIDC_CLIENT_ID` | `{orbital app client ID}` | OAuth2 client ID (same as orbital's) |
+| `ORBITAL_OIDC_ISSUER_URL` | `https://login.microsoftonline.com/{tenant}/v2.0` | OIDC issuer; token URL derived from this (Entra format) unless `ORBITAL_TOKEN_URL` is set |
+| `ORBITAL_OIDC_CLIENT_ID` | `{orbital app client ID}` | OAuth2 client ID |
 | `ORBITAL_OIDC_CLIENT_SECRET` | `""` | OAuth2 client secret — set this to enable OAuth2 mode |
+| `ORBITAL_TOKEN_URL` | `""` | Overrides the token endpoint derived from `ORBITAL_OIDC_ISSUER_URL`. Required for non-Entra providers (e.g. Keycloak: `https://<host>/realms/<realm>/protocol/openid-connect/token`) |
+| `ORBITAL_TOKEN_SCOPE` | `""` | Overrides the OAuth2 scope. Defaults to `api://{ORBITAL_OIDC_CLIENT_ID}/.default` (Entra format). Set for non-Entra providers that don't recognise that scope |
 | `ORBITAL_BEARER_TOKEN` | `""` | Static bearer token (deprecated fallback; overrides OAuth2 if set) |
 
 Auth priority: `ORBITAL_BEARER_TOKEN` (static) → `ORBITAL_OIDC_CLIENT_SECRET` set (OAuth2 client credentials) → plain HTTP (local dev only, will 401 against real Orbital).
