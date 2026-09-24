@@ -39,3 +39,6 @@ coverage.out
 
 # Local design scratchpad — not for review, not committed
 .local/
+
+# Local dev env (real values; the .example is committed)
+hack/local/*.env

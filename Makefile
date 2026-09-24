@@ -185,7 +185,15 @@ run-controller: ## Run the cb-controller from your host (set NAMESPACE=default f
 
 .PHONY: run-bundler
 run-bundler: ## Run the bundler service locally (BUNDLER_PORT=8020, ORBITAL_BASE_URL=http://localhost:8001).
-	go run $(BUNDLER_LDFLAGS) ./cmd/bundler/main.go
+	@# Local config: hack/local/bundler.env (gitignored) supplies the orbital URL
+	@# and the Keycloak client credentials. Mirrors orbital's
+	@# deploy/local/orbital.env. Copy hack/local/bundler.env.example to start.
+	@# Without it the bundler starts with no credentials and every call to
+	@# orbital 401s — which is what the log line below is for.
+	@[ -f hack/local/bundler.env ] && echo "sourcing hack/local/bundler.env" || \
+		echo "no hack/local/bundler.env — copy hack/local/bundler.env.example if orbital needs auth"
+	if [ -f hack/local/bundler.env ]; then set -a; . ./hack/local/bundler.env; set +a; fi; \
+		go run $(BUNDLER_LDFLAGS) ./cmd/bundler/main.go
 
 .PHONY: run-serverconfig
 run-serverconfig: ## Run the sc-controller locally (:8092 health, :8093 metrics; requires IDRAC_OOB_ALLOWLIST + IDRAC_FIELD_ALLOWLIST set).

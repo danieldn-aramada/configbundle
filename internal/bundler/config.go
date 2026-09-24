@@ -16,12 +16,21 @@ type Config struct {
 	OrbitalBaseURL     string `envconfig:"ORBITAL_BASE_URL"     default:"http://localhost:8001"`
 	OrbitalBearerToken string `envconfig:"ORBITAL_BEARER_TOKEN" default:""`
 
-	// OAuth2 client credentials. Token URL is derived from OIDCIssuerURL (Entra
-	// format) unless TokenURL is set. Scope defaults to the Entra client-credentials
-	// form unless TokenScope is set. Used when OrbitalBearerToken is empty.
-	// See docs/reference/API.md § bundler auth.
-	OIDCIssuerURL    string `envconfig:"ORBITAL_OIDC_ISSUER_URL"    default:"https://login.microsoftonline.com/8f231c2a-9551-4b40-be17-5b24afe5e890/v2.0"`
-	OIDCClientID     string `envconfig:"ORBITAL_OIDC_CLIENT_ID"     default:"5fc832f6-843e-4207-93dd-b3c3a77c06f2"`
+	// OAuth2 client credentials, used when OrbitalBearerToken is empty.
+	//
+	// These have NO defaults on purpose. They previously defaulted to an Entra
+	// tenant and client id, which survived orbital's move to Keycloak: setting
+	// only ORBITAL_OIDC_CLIENT_SECRET then sent a Keycloak secret to
+	// login.microsoftonline.com, which rejected it with AADSTS7000215
+	// ("Invalid client secret") — an error naming a tenant nobody had chosen.
+	// Orbital's own config dropped its OIDC defaults for the same reason and
+	// says so explicitly: "a tenant or client id baked in as a default silently
+	// points someone else's deployment at OUR identity provider."
+	//
+	// For local development copy hack/local/bundler.env.example to
+	// hack/local/bundler.env — `make run-bundler` sources it when present.
+	OIDCIssuerURL    string `envconfig:"ORBITAL_OIDC_ISSUER_URL"    default:""`
+	OIDCClientID     string `envconfig:"ORBITAL_OIDC_CLIENT_ID"     default:""`
 	OIDCClientSecret string `envconfig:"ORBITAL_OIDC_CLIENT_SECRET" default:""`
 
 	// TokenURL overrides the token endpoint derived from OIDCIssuerURL.
@@ -30,8 +39,9 @@ type Config struct {
 	TokenURL string `envconfig:"ORBITAL_TOKEN_URL" default:""`
 
 	// TokenScope overrides the OAuth2 scope sent to the token endpoint.
-	// Defaults to the Entra client-credentials scope api://{OIDCClientID}/.default.
-	// Set for non-Entra providers that do not recognise that scope format.
+	// Empty falls back to the Entra client-credentials form
+	// api://{OIDCClientID}/.default, which Keycloak does NOT recognise — set it
+	// (e.g. "openid") for any non-Entra provider.
 	TokenScope string `envconfig:"ORBITAL_TOKEN_SCOPE" default:""`
 }
 
