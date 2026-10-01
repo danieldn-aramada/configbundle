@@ -84,14 +84,13 @@ var _ = Describe("ConfigBundle Controller", func() {
 			cb := singleServerBundle("test-bundle", "colo-r740-01", "3RK3V64", "10.10.1.45")
 			Expect(k8sClient.Create(ctx, cb)).To(Succeed())
 
-			sc := &armadav1.ServerConfig{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "colo-r740-01"}, sc)
+			Eventually(func(g Gomega) {
+				sc := &armadav1.ServerConfig{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "colo-r740-01"}, sc)).To(Succeed())
+				g.Expect(sc.Spec.ServiceTag).To(Equal("3RK3V64"))
+				g.Expect(sc.Spec.Hostname).To(Equal(ptr.To("colo-r740-01")))
+				g.Expect(sc.Spec.OobIP).To(Equal("10.10.1.45"))
 			}, timeout, interval).Should(Succeed())
-
-			Expect(sc.Spec.ServiceTag).To(Equal("3RK3V64"))
-			Expect(sc.Spec.Hostname).To(Equal(ptr.To("colo-r740-01")))
-			Expect(sc.Spec.OobIP).To(Equal(ptr.To("10.10.1.45")))
 		})
 
 		It("propagates all idrac fields to the child CR", func() {
@@ -109,19 +108,18 @@ var _ = Describe("ConfigBundle Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, cb)).To(Succeed())
 
-			sc := &armadav1.ServerConfig{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "colo-r740-01"}, sc)
+			Eventually(func(g Gomega) {
+				sc := &armadav1.ServerConfig{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "colo-r740-01"}, sc)).To(Succeed())
+				g.Expect(sc.Spec.IdracSettings.FirmwareVersion).To(Equal(ptr.To("7.20.10.05")))
+				g.Expect(sc.Spec.IdracSettings.UsbManagementPortEnabled).To(Equal(ptr.To(true)))
+				g.Expect(sc.Spec.IdracSettings.RacadmEnabled).To(Equal(ptr.To(true)))
+				g.Expect(sc.Spec.IdracSettings.SSHEnabled).To(Equal(ptr.To(false)))
+				g.Expect(sc.Spec.IdracSettings.IPMIEnabled).To(Equal(ptr.To(false)))
+				g.Expect(sc.Spec.IdracSettings.DHCPEnabled).To(Equal(ptr.To(false)))
+				g.Expect(sc.Spec.IdracSettings.LockdownModeEnabled).To(Equal(ptr.To(false)))
+				g.Expect(sc.Spec.IdracSettings.OsToIdracPassThroughEnabled).To(Equal(ptr.To(false)))
 			}, timeout, interval).Should(Succeed())
-
-			Expect(sc.Spec.IdracSettings.FirmwareVersion).To(Equal(ptr.To("7.20.10.05")))
-			Expect(sc.Spec.IdracSettings.UsbManagementPortEnabled).To(Equal(ptr.To(true)))
-			Expect(sc.Spec.IdracSettings.RacadmEnabled).To(Equal(ptr.To(true)))
-			Expect(sc.Spec.IdracSettings.SSHEnabled).To(Equal(ptr.To(false)))
-			Expect(sc.Spec.IdracSettings.IPMIEnabled).To(Equal(ptr.To(false)))
-			Expect(sc.Spec.IdracSettings.DHCPEnabled).To(Equal(ptr.To(false)))
-			Expect(sc.Spec.IdracSettings.LockdownModeEnabled).To(Equal(ptr.To(false)))
-			Expect(sc.Spec.IdracSettings.OsToIdracPassThroughEnabled).To(Equal(ptr.To(false)))
 		})
 
 		It("creates one ServerConfig per server in a multi-server bundle", func() {

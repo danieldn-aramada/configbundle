@@ -375,7 +375,7 @@ Queries (paste into Grafana):
 - **`Skipped` is `Unknown`, not `False`.** False = managed and broken; Unknown =
   deliberately not managed.
 - **Condition message = state; per-action history = Kubernetes Events.**
-  `lastAppliedAt` (not `LastTransitionTime`) is the "still working" signal.
+  `lastReconciledAt` (not `LastTransitionTime`) is the "still working" signal — bumped on every successful reconcile.
 - **Intent (`.spec`) is not a metric.** It's declarative input the cloud already
   has (the orbital artifact); echoing it back is redundant. Metrics carry only
   what the cloud can't otherwise know: reconcile outcome + observed state. No
@@ -411,4 +411,5 @@ Queries (paste into Grafana):
 - **Self-emit vs KSM-CRS is a genuine tradeoff** (no tri-state to lose once
   success is a boolean). A shared template presents both; configbundle's default
   is self-emit (in-repo, fed by the one live read).
+- **`*T` on spec only when the owning controller may legitimately omit the field in an SSA partial patch.** If a controller is the sole field manager and always sets the field, use `T` (non-pointer). Anti-pattern: `+kubebuilder:validation:Required` on `*string` — pointer allows omission, Required forbids it; that contradiction always signals the type is wrong, not the annotation. See `ServerConfigSpec.OobIP` (`string`, required) vs `ServerConfigSpec.Hostname` (`*string`, optional — a server without a hostname produces an invalid CR name and the controller skips).
 - **Child CRs carry `lastAppliedVersion` + `lastAppliedDigest` propagated from the parent ConfigBundle.** `writeStatus` looks up the owning ConfigBundle via ownerReference and copies both fields before every status update. Avoids cross-referencing the parent to identify the source artifact. Fields are empty until the first `writeStatus` call; `markReconcileSuccess` does not propagate (steady-state path, values persist from prior write).

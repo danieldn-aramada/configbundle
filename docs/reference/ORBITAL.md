@@ -213,9 +213,9 @@ spec:
 
 | Action | What happens |
 |---|---|
-| **Force** | Publish new bundle with explicit takeover directive on specific fields. Galleon agent strips local SSA ownership on those fields on next apply. Cloud intent wins. |
-| **Accept** | Publish new bundle incorporating the local value. Edge admin should release ownership (`armadactl config release <cr> <field>`). Next bundle takes over the field normally. |
-| **Ignore** | Publish new bundle with no takeover directives. Local override persists. Divergence remains visible in report. |
+| **Reject** | Orbital intent unchanged. Bundle includes `spec.takeover[]` for the field. cb-controller's `processTakeover` force-reclaims the field from `local:admin`; `reconcileLocalClaims` strips local:admin's SSA claim automatically. Original cloud value wins. No edge admin action required. |
+| **Accept** | Orbital mutates intent in DGraph to match the local override value first. Bundle then includes `spec.takeover[]` for the field — same mechanism as Reject. cb-controller force-reclaims with the new cloud value (= the accepted local value). `reconcileLocalClaims` strips local:admin's claim automatically. No edge admin action required. |
+| **Ignore** | Orbital intent unchanged. Bundle includes `spec.ignored[]` for the field; cb-controller bows out unconditionally. local:admin retains sole ownership. Divergence persists and remains visible. |
 
 **Divergence report contains:** field-level divergence between active ConfigBundle intent and observed state — which fields are locally overridden, by whom, and since when. Reports are observability artifacts only; they do not drive actuation.
 

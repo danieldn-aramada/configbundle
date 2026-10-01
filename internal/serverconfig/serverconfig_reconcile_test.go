@@ -76,7 +76,7 @@ func TestReconcile_SkipsNoOobIP_WritesStatus(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "colo-r740-01"},
 		Spec: armadav1.ServerConfigSpec{
 			ServiceTag: "3RK3V64",
-			// OobIP intentionally nil — this is the skip trigger.
+			// OobIP intentionally empty — this is the skip trigger.
 		},
 	}
 	r, c := newSkipTestReconciler(t, sc)
@@ -100,7 +100,7 @@ func TestReconcile_SkipsOobNotAllowlisted_WritesStatus(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "colo-r740-02"},
 		Spec: armadav1.ServerConfigSpec{
 			ServiceTag: "FQK3V64",
-			OobIP:      ptr.To("10.99.99.99"), // NOT in allowlist (allowlist has 10.20.21.44)
+			OobIP:      "10.99.99.99", // NOT in allowlist (allowlist has 10.20.21.44)
 			IdracSettings: armadav1.IdracSettingsSpec{
 				SSHEnabled: ptr.To(true),
 			},
@@ -133,7 +133,7 @@ func TestReconcile_SkipStatusClearsOnAllowlistAdmission(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "colo-r740-03"},
 		Spec: armadav1.ServerConfigSpec{
 			ServiceTag: "7RK9Y21",
-			OobIP:      ptr.To("10.20.21.44"), // in the allowlist
+			OobIP:      "10.20.21.44", // in the allowlist
 			IdracSettings: armadav1.IdracSettingsSpec{
 				SSHEnabled: ptr.To(true),
 			},
@@ -181,7 +181,7 @@ func TestReconcile_FailureEmitsWarningEvent(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "colo-r740-09"},
 		Spec: armadav1.ServerConfigSpec{
 			ServiceTag: "FAIL01",
-			OobIP:      ptr.To("10.20.21.44"), // in allowlist → passes the gate, then creds load fails
+			OobIP:      "10.20.21.44", // in allowlist → passes the gate, then creds load fails
 			IdracSettings: armadav1.IdracSettingsSpec{
 				SSHEnabled: ptr.To(true),
 			},

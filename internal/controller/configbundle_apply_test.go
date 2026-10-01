@@ -23,9 +23,7 @@ func TestSpecOnlyUnstructured_StripsStatus(t *testing.T) {
 		Spec:       armadav1.ServerConfigSpec{OrbID: "o1", ServiceTag: "T1"},
 		// A populated status the parent must NOT send on apply.
 		Status: armadav1.ServerConfigStatus{
-			LastObserved: &armadav1.ServerConfigObserved{
-				IdracSettings: armadav1.ObservedIdracSettingsStatus{SSHEnabled: ptr.To(true)},
-			},
+			IdracSettings: armadav1.IdracSettingsStatus{SSHEnabled: ptr.To(true)},
 		},
 	}
 

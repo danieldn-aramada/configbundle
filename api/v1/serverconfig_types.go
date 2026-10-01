@@ -194,7 +194,7 @@ type ServerConfigSpec struct {
 	// OrbID is the immutable Orbital identifier for this server
 	// (mirrors ConfigBundle.spec.servers[].orbId). Carried on the child so
 	// cross-system grep, audit logs, and downstream telemetry can correlate
-	// without a parent round-trip. See docs/plans/server-identity-orbid.md.
+	// without a parent round-trip.
 	// +kubebuilder:validation:Required
 	OrbID string `json:"orbId"`
 
@@ -204,12 +204,13 @@ type ServerConfigSpec struct {
 	ServiceTag string `json:"serviceTag"`
 
 	// Hostname is the server's hostname for display and logging.
-	// +kubebuilder:validation:Required
+	// +optional
 	Hostname *string `json:"hostname,omitempty"`
 
 	// OobIP is the iDRAC management IP. The ServerConfig controller targets Redfish here.
+	// Empty string means the IP is not yet provisioned; the controller skips Redfish reconciliation.
 	// +kubebuilder:validation:Required
-	OobIP *string `json:"oobIP,omitempty"`
+	OobIP string `json:"oobIP"`
 
 	// IdracSettings holds desired iDRAC configuration, mirroring the orbital
 	// Server.idracSettings edge.
@@ -246,15 +247,9 @@ type BundleArtifact struct {
 	AppliedAt *metav1.Time `json:"appliedAt,omitempty"`
 }
 
-// ServerConfigObserved holds the live device state read during the last
-// reconcile. Written by sc-controller from live Redfish reads.
-type ServerConfigObserved struct {
-	// IdracSettings is the iDRAC attribute state read from the device.
-	// +optional
-	IdracSettings ObservedIdracSettingsStatus `json:"idracSettings,omitempty"`
-}
-
 // ServerConfigStatus records the controller's observed state.
+// spec.X (desired) ↔ status.X (observed) at matching paths per domain controller convention.
+// Status is a superset: observation-only fields (timestamps, identity, location) have no spec twin.
 type ServerConfigStatus struct {
 	// ObservedGeneration is the spec.generation the controller last successfully
 	// reconciled. Tooling compares this to metadata.generation to know "has the
@@ -284,31 +279,60 @@ type ServerConfigStatus struct {
 	// +optional
 	LastAppliedBundle *BundleArtifact `json:"lastAppliedBundle,omitempty"`
 
-	// LastObserved holds the live device state captured during the last
-	// successful reconcile.
+	// IdracSettings mirrors spec.idracSettings — observed attribute state read
+	// from the device via Redfish. Nil pointer fields mean "never confirmed."
 	// +optional
-	LastObserved *ServerConfigObserved `json:"lastObserved,omitempty"`
+	IdracSettings IdracSettingsStatus `json:"idracSettings,omitempty"`
+
+	// SerialNumber is the hardware serial number read from Redfish
+	// (System.Embedded.1 SerialNumber). Nil until first successful Redfish read.
+	// +optional
+	SerialNumber *string `json:"serialNumber,omitempty"`
+
+	// Model is the server model string read from Redfish
+	// (System.Embedded.1 Model, e.g. "PowerEdge R450"). Nil until first read.
+	// +optional
+	Model *string `json:"model,omitempty"`
+
+	// Manufacturer is read from Redfish (System.Embedded.1 Manufacturer).
+	// Nil until first successful Redfish read.
+	// +optional
+	Manufacturer *string `json:"manufacturer,omitempty"`
+
+	// Location is the physical rack placement read from Redfish
+	// (Chassis.Location.Placement). Nil until first successful Redfish read.
+	// +optional
+	Location *ServerLocation `json:"location,omitempty"`
 
 	// Maintenance reflects the current maintenance sequence state.
 	// +optional
 	Maintenance *MaintenanceStatus `json:"maintenance,omitempty"`
 }
 
-// ObservedIdracSettingsStatus mirrors the controller-managed subset of
-// IdracSettingsSpec. Pointer types so absence means "never confirmed" (vs.
-// "confirmed and false").
-type ObservedIdracSettingsStatus struct {
+// IdracSettingsStatus mirrors the observable fields of IdracSettingsSpec.
+// Pointer types: nil = never confirmed (not "confirmed and false").
+type IdracSettingsStatus struct {
 	// +optional
 	SSHEnabled *bool `json:"sshEnabled,omitempty"`
 	// +optional
 	IPMIEnabled *bool `json:"ipmiEnabled,omitempty"`
 	// +optional
 	RacadmEnabled *bool `json:"racadmEnabled,omitempty"`
-	// FirmwareVersion is the observed iDRAC firmware read from Redfish, mirroring
-	// spec.idracSettings.firmwareVersion. Nil until a firmware read lands (not yet
-	// implemented) — observation-only for now.
+	// FirmwareVersion observed from Redfish; nil until firmware read is implemented.
 	// +optional
 	FirmwareVersion *string `json:"firmwareVersion,omitempty"`
+}
+
+// ServerLocation is the physical rack placement of a server, sourced from
+// Redfish Chassis.Location.Placement (standard Redfish, vendor-agnostic).
+type ServerLocation struct {
+	// Rack is the rack name (Chassis.Location.Placement.Rack).
+	// +optional
+	Rack *string `json:"rack,omitempty"`
+	// RackOffset is the U position from the bottom of the rack, EIA-310
+	// (Chassis.Location.Placement.RackOffset).
+	// +optional
+	RackOffset *int32 `json:"rackOffset,omitempty"`
 }
 
 // +kubebuilder:object:root=true

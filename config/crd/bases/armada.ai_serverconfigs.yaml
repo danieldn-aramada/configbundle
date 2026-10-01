@@ -196,15 +196,16 @@ spec:
                 - enabled
                 type: object
               oobIP:
-                description: OobIP is the iDRAC management IP. The ServerConfig controller
-                  targets Redfish here.
+                description: |-
+                  OobIP is the iDRAC management IP. The ServerConfig controller targets Redfish here.
+                  Empty string means the IP is not yet provisioned; the controller skips Redfish reconciliation.
                 type: string
               orbId:
                 description: |-
                   OrbID is the immutable Orbital identifier for this server
                   (mirrors ConfigBundle.spec.servers[].orbId). Carried on the child so
                   cross-system grep, audit logs, and downstream telemetry can correlate
-                  without a parent round-trip. See docs/plans/server-identity-orbid.md.
+                  without a parent round-trip.
                 type: string
               serviceTag:
                 description: |-
@@ -212,13 +213,15 @@ spec:
                   Repeated here (vs. deriving from CR name) so the controller has it without string manipulation.
                 type: string
             required:
-            - hostname
             - oobIP
             - orbId
             - serviceTag
             type: object
           status:
-            description: ServerConfigStatus records the controller's observed state.
+            description: |-
+              ServerConfigStatus records the controller's observed state.
+              spec.X (desired) ↔ status.X (observed) at matching paths per domain controller convention.
+              Status is a superset: observation-only fields (timestamps, identity, location) have no spec twin.
             properties:
               conditions:
                 description: Conditions records detailed status conditions.
@@ -280,6 +283,22 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              idracSettings:
+                description: |-
+                  IdracSettings mirrors spec.idracSettings — observed attribute state read
+                  from the device via Redfish. Nil pointer fields mean "never confirmed."
+                properties:
+                  firmwareVersion:
+                    description: FirmwareVersion observed from Redfish; nil until
+                      firmware read is implemented.
+                    type: string
+                  ipmiEnabled:
+                    type: boolean
+                  racadmEnabled:
+                    type: boolean
+                  sshEnabled:
+                    type: boolean
+                type: object
               lastAppliedBundle:
                 description: |-
                   LastAppliedBundle records the ConfigBundle OCI artifact whose spec produced
@@ -300,29 +319,6 @@ spec:
                       (e.g. "v94").
                     type: string
                 type: object
-              lastObserved:
-                description: |-
-                  LastObserved holds the live device state captured during the last
-                  successful reconcile.
-                properties:
-                  idracSettings:
-                    description: IdracSettings is the iDRAC attribute state read from
-                      the device.
-                    properties:
-                      firmwareVersion:
-                        description: |-
-                          FirmwareVersion is the observed iDRAC firmware read from Redfish, mirroring
-                          spec.idracSettings.firmwareVersion. Nil until a firmware read lands (not yet
-                          implemented) — observation-only for now.
-                        type: string
-                      ipmiEnabled:
-                        type: boolean
-                      racadmEnabled:
-                        type: boolean
-                      sshEnabled:
-                        type: boolean
-                    type: object
-                type: object
               lastReconciledAt:
                 description: |-
                   LastReconciledAt is when sc-controller last successfully compared spec
@@ -333,6 +329,21 @@ spec:
                   Nil = no successful reconcile yet.
                 format: date-time
                 type: string
+              location:
+                description: |-
+                  Location is the physical rack placement read from Redfish
+                  (Chassis.Location.Placement). Nil until first successful Redfish read.
+                properties:
+                  rack:
+                    description: Rack is the rack name (Chassis.Location.Placement.Rack).
+                    type: string
+                  rackOffset:
+                    description: |-
+                      RackOffset is the U position from the bottom of the rack, EIA-310
+                      (Chassis.Location.Placement.RackOffset).
+                    format: int32
+                    type: integer
+                type: object
               maintenance:
                 description: Maintenance reflects the current maintenance sequence
                   state.
@@ -384,6 +395,16 @@ spec:
                     - Failed
                     type: string
                 type: object
+              manufacturer:
+                description: |-
+                  Manufacturer is read from Redfish (System.Embedded.1 Manufacturer).
+                  Nil until first successful Redfish read.
+                type: string
+              model:
+                description: |-
+                  Model is the server model string read from Redfish
+                  (System.Embedded.1 Model, e.g. "PowerEdge R450"). Nil until first read.
+                type: string
               observedGeneration:
                 description: |-
                   ObservedGeneration is the spec.generation the controller last successfully
@@ -392,6 +413,11 @@ spec:
                   "are we converged?" signal.
                 format: int64
                 type: integer
+              serialNumber:
+                description: |-
+                  SerialNumber is the hardware serial number read from Redfish
+                  (System.Embedded.1 SerialNumber). Nil until first successful Redfish read.
+                type: string
             type: object
         type: object
     served: true

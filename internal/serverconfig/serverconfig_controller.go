@@ -247,14 +247,14 @@ func (r *ServerConfigReconciler) Reconcile(ctx context.Context, req reconcile.Re
 
 	// No oobIP means nothing actionable — surface the skip on status so
 	// `kubectl describe sc <name>` explains the blank live state.
-	if sc.Spec.OobIP == nil || *sc.Spec.OobIP == "" {
+	if sc.Spec.OobIP == "" {
 		logger.V(1).Info("no oobIP on serverconfig; skipping",
 			"serviceTag", sc.Spec.ServiceTag)
 		r.setStatusSkipped(ctx, &sc, "NoOobIP",
 			"spec.oobIP is empty — no target to reconcile against. Populate spec.oobIP to enable reconciliation.")
 		return mergeResult(maintResult, reconcile.Result{}), nil
 	}
-	oobIP := *sc.Spec.OobIP
+	oobIP := sc.Spec.OobIP
 
 	// Allowlist enforcement — short-circuit before fetching credentials or
 	// touching the network. Status is written so operators can distinguish
@@ -479,7 +479,7 @@ func (r *ServerConfigReconciler) writeStatus(ctx context.Context, sc *armadav1.S
 // iDRAC round-trips on unrelated status races.
 func (r *ServerConfigReconciler) recordObserved(ctx context.Context, sc *armadav1.ServerConfig, attrs map[string]any) {
 	desired := buildObservedIdrac(attrs, r.AllowedFields)
-	if observedIdracEqual(observedIdracOrZero(sc.Status.LastObserved), desired) {
+	if observedIdracEqual(sc.Status.IdracSettings, desired) {
 		return
 	}
 	logger := log.FromContext(ctx).WithName("serverconfig.status")
@@ -488,23 +488,16 @@ func (r *ServerConfigReconciler) recordObserved(ctx context.Context, sc *armadav
 		if err := r.Get(ctx, client.ObjectKeyFromObject(sc), &fresh); err != nil {
 			return err
 		}
-		if observedIdracEqual(observedIdracOrZero(fresh.Status.LastObserved), desired) {
+		if observedIdracEqual(fresh.Status.IdracSettings, desired) {
 			return nil
 		}
 		base := fresh.DeepCopy()
-		fresh.Status.LastObserved = &armadav1.ServerConfigObserved{IdracSettings: desired}
+		fresh.Status.IdracSettings = desired
 		return r.Status().Patch(ctx, &fresh, client.MergeFrom(base))
 	})
 	if err != nil {
 		logger.Info("observed status update failed (will retry next reconcile)", "err", err.Error())
 	}
-}
-
-func observedIdracOrZero(obs *armadav1.ServerConfigObserved) armadav1.ObservedIdracSettingsStatus {
-	if obs == nil {
-		return armadav1.ObservedIdracSettingsStatus{}
-	}
-	return obs.IdracSettings
 }
 
 // buildObservedIdrac projects the live Redfish attribute map into the
@@ -513,8 +506,8 @@ func observedIdracOrZero(obs *armadav1.ServerConfigObserved) armadav1.ObservedId
 // nil in the output — the ledger only reflects values the controller manages
 // AND observed live on the target. Mirror of package-level recordObserved
 // (metrics.go) — both share the same live-attr-derivation shape.
-func buildObservedIdrac(attrs map[string]any, allowed map[string]bool) armadav1.ObservedIdracSettingsStatus {
-	var out armadav1.ObservedIdracSettingsStatus
+func buildObservedIdrac(attrs map[string]any, allowed map[string]bool) armadav1.IdracSettingsStatus {
+	var out armadav1.IdracSettingsStatus
 	set := func(field, attrKey string, dst **bool) {
 		if !allowed[field] {
 			return
@@ -532,7 +525,7 @@ func buildObservedIdrac(attrs map[string]any, allowed map[string]bool) armadav1.
 	return out
 }
 
-func observedIdracEqual(a, b armadav1.ObservedIdracSettingsStatus) bool {
+func observedIdracEqual(a, b armadav1.IdracSettingsStatus) bool {
 	return boolPtrEqual(a.SSHEnabled, b.SSHEnabled) &&
 		boolPtrEqual(a.IPMIEnabled, b.IPMIEnabled) &&
 		boolPtrEqual(a.RacadmEnabled, b.RacadmEnabled)

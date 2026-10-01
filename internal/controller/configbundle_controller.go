@@ -267,6 +267,10 @@ func (r *ConfigBundleReconciler) applyServerConfig(ctx context.Context, cb *arma
 	if server.Hostname != nil {
 		hostname = *server.Hostname
 	}
+	oobIP := ""
+	if server.OobIP != nil {
+		oobIP = *server.OobIP
+	}
 	labels := map[string]string{}
 	annotations := map[string]string{}
 	if server.KubernetesNode != nil {
@@ -293,7 +297,7 @@ func (r *ConfigBundleReconciler) applyServerConfig(ctx context.Context, cb *arma
 			OrbID:          server.OrbID,
 			ServiceTag:     server.ServiceTag,
 			Hostname:       server.Hostname,
-			OobIP:          server.OobIP,
+			OobIP:          oobIP,
 			IdracSettings:  server.IdracSettings,
 			KubernetesNode: server.KubernetesNode,
 			Maintenance:    server.Maintenance,
